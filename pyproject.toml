@@ -14,6 +14,7 @@ dependencies = []
 
 [project.scripts]
 pixel-fix = "pixel_fix.cli:main"
+pixel-fix-gui = "pixel_fix.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
