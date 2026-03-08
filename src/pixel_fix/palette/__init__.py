@@ -1,1 +1,1 @@
-"""Palette utilities."""
+"""Palette and color-mode utilities."""

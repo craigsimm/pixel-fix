@@ -10,7 +10,11 @@ from pixel_fix.grid.hough_mesh import estimate_hough_candidate
 from pixel_fix.grid.projection_fft import estimate_projection_candidate
 from pixel_fix.grid.scoring import GridScoreWeights, select_best_candidate
 from pixel_fix.io import copy_as_placeholder, validate_input_path, validate_output_path
-from pixel_fix.palette.quantize import remap_to_palette, top_k_palette
+from pixel_fix.palette.color_modes import COLOR_MODES, convert_mode, extract_unique_colors
+from pixel_fix.palette.dither import apply_dither
+from pixel_fix.palette.io import load_palette, save_palette
+from pixel_fix.palette.quantize import generate_palette
+from pixel_fix.palette.replace import replace_batch, replace_exact, replace_tolerance
 from pixel_fix.resample import downsample_labels_by_block
 
 
@@ -23,6 +27,16 @@ class PipelineConfig:
     min_island_size: int = 2
     line_color: int | None = None
     overwrite: bool = False
+    input_mode: str = "rgba"
+    output_mode: str = "rgba"
+    quantizer: str = "topk"
+    dither_mode: str = "none"
+    palette_path: Path | None = None
+    save_palette_path: Path | None = None
+    replace_src: int | None = None
+    replace_dst: int | None = None
+    replace_tolerance: int = 0
+    replace_map: dict[int, int] | None = None
 
 
 class PixelFixPipeline:
@@ -59,23 +73,54 @@ class PixelFixPipeline:
             )
         return select_best_candidate(candidates, GridScoreWeights()).candidate.pixel_width
 
-    def run_on_labels(self, labels: list[list[int]]) -> list[list[int]]:
-        height = len(labels)
-        width = len(labels[0]) if height else 0
+    def _resolve_palette(self, reduced: list[list[int]], override: list[int] | None = None) -> list[int]:
+        if override:
+            return override
+        if self.config.palette_path is not None:
+            return load_palette(self.config.palette_path)
+        return generate_palette(reduced, colors=self.config.colors, method=self.config.quantizer)
+
+    def _apply_replacement(self, labels: list[list[int]]) -> list[list[int]]:
+        replaced = labels
+        if self.config.replace_src is not None and self.config.replace_dst is not None:
+            if self.config.replace_tolerance > 0:
+                replaced = replace_tolerance(replaced, self.config.replace_src, self.config.replace_dst, self.config.replace_tolerance)
+            else:
+                replaced = replace_exact(replaced, self.config.replace_src, self.config.replace_dst)
+        if self.config.replace_map:
+            replaced = replace_batch(replaced, self.config.replace_map)
+        return replaced
+
+    def run_on_labels(self, labels: list[list[int]], palette_override: list[int] | None = None) -> list[list[int]]:
+        if self.config.input_mode not in COLOR_MODES or self.config.output_mode not in COLOR_MODES:
+            raise ValueError("Unsupported color mode")
+
+        normalized = convert_mode(labels, self.config.input_mode)
+        height = len(normalized)
+        width = len(normalized[0]) if height else 0
         pixel_width = max(1, self._choose_pixel_width(width, height))
 
-        reduced = downsample_labels_by_block(labels, pixel_width, sampler=self.config.cell_sampler)
-        palette = top_k_palette(reduced, colors=self.config.colors)
-        mapped = remap_to_palette(reduced, palette)
+        reduced = downsample_labels_by_block(normalized, pixel_width, sampler=self.config.cell_sampler)
+        palette = self._resolve_palette(reduced, override=palette_override)
+
+        if self.config.save_palette_path is not None:
+            save_palette(self.config.save_palette_path, palette)
+
+        mapped = apply_dither(reduced, palette, self.config.dither_mode)
+        mapped = self._apply_replacement(mapped)
         cleaned = remove_small_islands(mapped, min_size=self.config.min_island_size, connectivity=8)
 
         if self.config.line_color is not None:
             cleaned = bridge_single_pixel_gaps(cleaned, self.config.line_color)
 
-        return cleaned
+        if self.config.output_mode == "indexed":
+            # keep mapped labels but limit to palette for external indexed workflows
+            limited_palette = extract_unique_colors(cleaned)[:256]
+            cleaned = apply_dither(cleaned, limited_palette or palette, "none")
+
+        return convert_mode(cleaned, self.config.output_mode)
 
     def run_file(self, input_path: Path, output_path: Path) -> None:
         validate_input_path(input_path)
         validate_output_path(output_path, overwrite=self.config.overwrite)
-        # Temporary no-dependency fallback; image backend integration is next.
         copy_as_placeholder(input_path, output_path)
