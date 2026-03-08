@@ -17,3 +17,19 @@ pixel-fix input.png output.png --grid auto --colors 16 --overwrite
 ```
 
 > Note: image backend integration is intentionally minimal right now. `run_file` currently performs validated file I/O with placeholder copy behavior while algorithmic stages are implemented and testable through `run_on_labels`.
+
+## Packaging a Windows GUI `.exe` (PyInstaller)
+Use a tiny bootstrap script so the packaged binary always launches the GUI entrypoint (`pixel_fix.gui:main`) instead of the CLI.
+
+```bash
+python -m pip install pyinstaller
+pyinstaller --noconfirm --clean --onefile --windowed --name pixel-fix-gui --paths src scripts/pyinstaller_gui_entry.py
+```
+
+Expected output executable path:
+
+```text
+dist/pixel-fix-gui.exe
+```
+
+This first packaging pass is intentionally minimal and reliability-focused. Icon and additional Windows resource metadata (version info, file icon, etc.) can be added later as optional PyInstaller flags.
