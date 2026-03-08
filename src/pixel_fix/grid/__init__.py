@@ -1,0 +1,1 @@
+"""Grid detection and scoring."""
