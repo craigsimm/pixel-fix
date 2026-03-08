@@ -5,9 +5,12 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from pixel_fix.palette.color_modes import extract_unique_colors
+from pixel_fix.palette.io import load_palette, save_palette
+from pixel_fix.palette.quantize import generate_palette
 from pixel_fix.pipeline import PipelineConfig
 
-from .processing import RGBGrid, render_preview
+from .processing import RGBGrid, render_preview, rgb_to_labels
 from .state import PreviewSettings, SettingsSession
 from .zoom import ZOOM_PRESETS, choose_fit_zoom, zoom_in, zoom_out
 
@@ -16,13 +19,14 @@ class PixelFixGui:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Pixel-Fix Preview")
-        self.root.geometry("1200x800")
+        self.root.geometry("1260x860")
 
         self.session = SettingsSession()
         self.original_grid: RGBGrid | None = None
         self.preview_grid: RGBGrid | None = None
         self.source_path: Path | None = None
         self.render_version = 0
+        self.active_palette: list[int] | None = None
 
         self.zoom = 100
         self.zoom_var = tk.IntVar(value=self.zoom)
@@ -42,23 +46,11 @@ class PixelFixGui:
         ttk.Button(top, text="Undo", command=self.undo).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(top, text="View:").pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Combobox(
-            top,
-            textvariable=self.view_var,
-            values=("processed", "original"),
-            state="readonly",
-            width=10,
-        ).pack(side=tk.LEFT)
+        ttk.Combobox(top, textvariable=self.view_var, values=("processed", "original"), state="readonly", width=10).pack(side=tk.LEFT)
         self.view_var.trace_add("write", lambda *_: self.redraw_canvas())
 
         ttk.Label(top, text="Zoom:").pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Combobox(
-            top,
-            textvariable=self.zoom_var,
-            values=ZOOM_PRESETS,
-            state="readonly",
-            width=6,
-        ).pack(side=tk.LEFT)
+        ttk.Combobox(top, textvariable=self.zoom_var, values=ZOOM_PRESETS, state="readonly", width=6).pack(side=tk.LEFT)
         self.zoom_var.trace_add("write", lambda *_: self._apply_zoom(self.zoom_var.get()))
 
         ttk.Button(top, text="-", width=3, command=self.zoom_step_out).pack(side=tk.LEFT, padx=(6, 0))
@@ -79,17 +71,44 @@ class PixelFixGui:
         self.bridge_var = tk.BooleanVar(value=False)
         self.line_color_var = tk.StringVar(value="0")
 
+        self.input_mode_var = tk.StringVar(value="rgba")
+        self.output_mode_var = tk.StringVar(value="rgba")
+        self.quantizer_var = tk.StringVar(value="topk")
+        self.dither_var = tk.StringVar(value="none")
+
+        self.replace_enabled_var = tk.BooleanVar(value=False)
+        self.replace_src_var = tk.StringVar(value="")
+        self.replace_dst_var = tk.StringVar(value="")
+        self.replace_tol_var = tk.IntVar(value=0)
+
         self._add_combo(controls, "Grid", self.grid_var, ("auto", "hough", "fft", "divisor"))
         self._add_entry(controls, "Pixel width", self.pixel_width_var)
         self._add_spin(controls, "Colors", self.colors_var, 2, 256)
         self._add_combo(controls, "Sampler", self.sampler_var, ("mode", "median"))
         self._add_spin(controls, "Min island", self.min_island_var, 1, 32)
+        self._add_combo(controls, "Input mode", self.input_mode_var, ("rgba", "indexed", "grayscale"))
+        self._add_combo(controls, "Output mode", self.output_mode_var, ("rgba", "indexed", "grayscale"))
+        self._add_combo(controls, "Quantizer", self.quantizer_var, ("topk", "kmeans"))
+        self._add_combo(controls, "Dithering", self.dither_var, ("none", "floyd-steinberg", "ordered"))
 
         line = ttk.Frame(controls)
         line.pack(fill=tk.X, padx=8, pady=4)
         ttk.Checkbutton(line, text="Bridge 1px gaps", variable=self.bridge_var, command=self._on_settings_changed).pack(side=tk.LEFT)
-
         self._add_entry(controls, "Line color", self.line_color_var)
+
+        repl = ttk.LabelFrame(controls, text="Color Replacement")
+        repl.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Checkbutton(repl, text="Enable", variable=self.replace_enabled_var, command=self._on_settings_changed).pack(anchor=tk.W, padx=4, pady=2)
+        self._add_entry(repl, "From (#RRGGBB)", self.replace_src_var)
+        self._add_entry(repl, "To (#RRGGBB)", self.replace_dst_var)
+        self._add_spin(repl, "Tolerance", self.replace_tol_var, 0, 255)
+
+        palette_actions = ttk.LabelFrame(controls, text="Palette")
+        palette_actions.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Button(palette_actions, text="Extract Unique", command=self.extract_unique_palette).pack(fill=tk.X, padx=4, pady=2)
+        ttk.Button(palette_actions, text="Generate Limited", command=self.generate_palette_from_image).pack(fill=tk.X, padx=4, pady=2)
+        ttk.Button(palette_actions, text="Load Palette", command=self.load_palette_file).pack(fill=tk.X, padx=4, pady=2)
+        ttk.Button(palette_actions, text="Save Palette", command=self.save_palette_file).pack(fill=tk.X, padx=4, pady=2)
 
         for variable in (
             self.grid_var,
@@ -98,6 +117,13 @@ class PixelFixGui:
             self.sampler_var,
             self.min_island_var,
             self.line_color_var,
+            self.input_mode_var,
+            self.output_mode_var,
+            self.quantizer_var,
+            self.dither_var,
+            self.replace_src_var,
+            self.replace_dst_var,
+            self.replace_tol_var,
         ):
             variable.trace_add("write", lambda *_: self._on_settings_changed())
 
@@ -115,19 +141,19 @@ class PixelFixGui:
     def _add_combo(self, parent: ttk.Widget, label: str, variable: tk.StringVar, values: tuple[str, ...]) -> None:
         row = ttk.Frame(parent)
         row.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row, text=label, width=12).pack(side=tk.LEFT)
+        ttk.Label(row, text=label, width=16).pack(side=tk.LEFT)
         ttk.Combobox(row, textvariable=variable, values=values, state="readonly", width=14).pack(side=tk.RIGHT)
 
     def _add_entry(self, parent: ttk.Widget, label: str, variable: tk.StringVar) -> None:
         row = ttk.Frame(parent)
         row.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row, text=label, width=12).pack(side=tk.LEFT)
+        ttk.Label(row, text=label, width=16).pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=variable, width=16).pack(side=tk.RIGHT)
 
     def _add_spin(self, parent: ttk.Widget, label: str, variable: tk.IntVar, min_value: int, max_value: int) -> None:
         row = ttk.Frame(parent)
         row.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row, text=label, width=12).pack(side=tk.LEFT)
+        ttk.Label(row, text=label, width=16).pack(side=tk.LEFT)
         ttk.Spinbox(row, from_=min_value, to=max_value, textvariable=variable, width=8).pack(side=tk.RIGHT)
 
     def open_image(self) -> None:
@@ -143,6 +169,43 @@ class PixelFixGui:
             self.schedule_preview_render()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Failed to load image", str(exc))
+
+    def extract_unique_palette(self) -> None:
+        if self.original_grid is None:
+            return
+        labels = rgb_to_labels(self.original_grid)
+        self.active_palette = extract_unique_colors(labels)
+        self.status_var.set(f"Extracted {len(self.active_palette)} unique colors")
+        self.schedule_preview_render()
+
+    def generate_palette_from_image(self) -> None:
+        if self.original_grid is None:
+            return
+        labels = rgb_to_labels(self.original_grid)
+        self.active_palette = generate_palette(labels, colors=max(2, int(self.colors_var.get())), method=self.quantizer_var.get())
+        self.status_var.set(f"Generated palette with {len(self.active_palette)} colors")
+        self.schedule_preview_render()
+
+    def load_palette_file(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("Palette JSON", "*.json")])
+        if not path:
+            return
+        try:
+            self.active_palette = load_palette(Path(path))
+            self.status_var.set(f"Loaded palette with {len(self.active_palette)} colors")
+            self.schedule_preview_render()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Failed to load palette", str(exc))
+
+    def save_palette_file(self) -> None:
+        if not self.active_palette:
+            messagebox.showwarning("No palette", "Extract or generate a palette first.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Palette JSON", "*.json")])
+        if not path:
+            return
+        save_palette(Path(path), self.active_palette)
+        self.status_var.set(f"Saved palette to {Path(path).name}")
 
     def _load_png_grid(self, path: Path) -> RGBGrid:
         img = tk.PhotoImage(file=str(path))
@@ -200,6 +263,13 @@ class PixelFixGui:
             cell_sampler=self.sampler_var.get(),
             min_island_size=max(1, int(self.min_island_var.get())),
             line_color=self._parse_optional_int(self.line_color_var.get()) if self.bridge_var.get() else None,
+            input_mode=self.input_mode_var.get(),
+            output_mode=self.output_mode_var.get(),
+            quantizer=self.quantizer_var.get(),
+            dither_mode=self.dither_var.get(),
+            replace_src=self._parse_color(self.replace_src_var.get()) if self.replace_enabled_var.get() else None,
+            replace_dst=self._parse_color(self.replace_dst_var.get()) if self.replace_enabled_var.get() else None,
+            replace_tolerance=max(0, int(self.replace_tol_var.get())),
         )
         if new != previous:
             self.session.apply(**new.__dict__)
@@ -211,6 +281,17 @@ class PixelFixGui:
         if not stripped:
             return None
         return int(stripped)
+
+    @staticmethod
+    def _parse_color(value: str) -> int | None:
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.startswith("#"):
+            stripped = stripped[1:]
+        if len(stripped) != 6:
+            raise ValueError("Color must be #RRGGBB")
+        return int(stripped, 16)
 
     def schedule_preview_render(self) -> None:
         if self._debounce_id is not None:
@@ -233,8 +314,15 @@ class PixelFixGui:
                 cell_sampler=settings.cell_sampler,
                 min_island_size=settings.min_island_size,
                 line_color=settings.line_color,
+                input_mode=settings.input_mode,
+                output_mode=settings.output_mode,
+                quantizer=settings.quantizer,
+                dither_mode=settings.dither_mode,
+                replace_src=settings.replace_src,
+                replace_dst=settings.replace_dst,
+                replace_tolerance=settings.replace_tolerance,
             )
-            preview = render_preview(self.original_grid or [], config)
+            preview = render_preview(self.original_grid or [], config, palette_override=self.active_palette)
             self.root.after(0, lambda: self._apply_render_result(render_id, preview))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -263,6 +351,14 @@ class PixelFixGui:
         self.min_island_var.set(settings.min_island_size)
         self.bridge_var.set(settings.line_color is not None)
         self.line_color_var.set("" if settings.line_color is None else str(settings.line_color))
+        self.input_mode_var.set(settings.input_mode)
+        self.output_mode_var.set(settings.output_mode)
+        self.quantizer_var.set(settings.quantizer)
+        self.dither_var.set(settings.dither_mode)
+        self.replace_enabled_var.set(settings.replace_src is not None and settings.replace_dst is not None)
+        self.replace_src_var.set("" if settings.replace_src is None else f"#{settings.replace_src:06x}")
+        self.replace_dst_var.set("" if settings.replace_dst is None else f"#{settings.replace_dst:06x}")
+        self.replace_tol_var.set(settings.replace_tolerance)
 
     def _apply_zoom(self, value: int) -> None:
         self.zoom = value
@@ -278,9 +374,7 @@ class PixelFixGui:
         grid = self._get_active_grid()
         if not grid:
             return
-        self.zoom_var.set(
-            choose_fit_zoom(len(grid[0]), len(grid), self.canvas.winfo_width(), self.canvas.winfo_height())
-        )
+        self.zoom_var.set(choose_fit_zoom(len(grid[0]), len(grid), self.canvas.winfo_width(), self.canvas.winfo_height()))
 
     def _start_pan(self, event: tk.Event) -> None:
         self.canvas.scan_mark(event.x, event.y)

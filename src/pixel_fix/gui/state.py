@@ -11,6 +11,13 @@ class PreviewSettings:
     cell_sampler: str = "mode"
     min_island_size: int = 2
     line_color: int | None = None
+    input_mode: str = "rgba"
+    output_mode: str = "rgba"
+    quantizer: str = "topk"
+    dither_mode: str = "none"
+    replace_src: int | None = None
+    replace_dst: int | None = None
+    replace_tolerance: int = 0
 
 
 class UndoHistory:

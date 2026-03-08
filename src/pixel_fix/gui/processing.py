@@ -15,8 +15,8 @@ def labels_to_rgb(grid: LabelGrid) -> RGBGrid:
     return [[((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF) for value in row] for row in grid]
 
 
-def render_preview(grid: RGBGrid, config: PipelineConfig) -> RGBGrid:
+def render_preview(grid: RGBGrid, config: PipelineConfig, palette_override: list[int] | None = None) -> RGBGrid:
     pipeline = PixelFixPipeline(config)
     labels = rgb_to_labels(grid)
-    processed = pipeline.run_on_labels(labels)
+    processed = pipeline.run_on_labels(labels, palette_override=palette_override)
     return labels_to_rgb(processed)
