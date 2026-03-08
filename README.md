@@ -60,11 +60,21 @@ python -c "from pixel_fix.gui import main; raise SystemExit(main())"
 ---
 
 ## Build a Windows `.exe`
+The repository includes the PNG icon source files in the root plus a generated `pixel-fix.ico` for Windows packaging. The `.ico` is built from `ico-512.png` and includes Windows Explorer sizes up to `256x256`.
+
+### Build with the included PowerShell script
+```powershell
+.\scripts\build_windows_exe.ps1
+```
+
+This script installs `PyInstaller` if needed and builds the GUI executable with the app icon embedded.
+
+### Build manually
 Use PyInstaller with the GUI bootstrap script so the executable launches the desktop app directly.
 
 ```bash
 python -m pip install pyinstaller
-pyinstaller --noconfirm --clean --onefile --windowed --name pixel-fix-gui --paths src scripts/pyinstaller_gui_entry.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name pixel-fix-gui --paths src --icon pixel-fix.ico --add-data "pixel-fix.ico;." --add-data "ico-32.png;." scripts/pyinstaller_gui_entry.py
 ```
 
 Output:
@@ -72,6 +82,8 @@ Output:
 ```text
 dist/pixel-fix-gui.exe
 ```
+
+The resulting executable can be committed to the repository if you want, but the cleaner distribution path is usually to keep it under GitHub Releases and keep only the source files plus build script in git.
 
 ---
 

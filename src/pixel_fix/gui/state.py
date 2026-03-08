@@ -5,19 +5,13 @@ from dataclasses import dataclass, replace
 
 @dataclass(frozen=True)
 class PreviewSettings:
-    grid: str = "auto"
-    pixel_width: int | None = None
+    pixel_width: int = 2
+    downsample_mode: str = "nearest"
     colors: int = 16
-    cell_sampler: str = "mode"
-    min_island_size: int = 2
-    line_color: int | None = None
     input_mode: str = "rgba"
     output_mode: str = "rgba"
     quantizer: str = "topk"
     dither_mode: str = "none"
-    replace_src: int | None = None
-    replace_dst: int | None = None
-    replace_tolerance: int = 0
 
 
 class UndoHistory:

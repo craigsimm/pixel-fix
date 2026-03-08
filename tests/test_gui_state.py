@@ -9,14 +9,14 @@ def test_apply_tracks_undo_history() -> None:
 
 
 def test_undo_restores_previous_settings() -> None:
-    session = SettingsSession(PreviewSettings(colors=16, min_island_size=2))
+    session = SettingsSession(PreviewSettings(colors=16, pixel_width=2))
     session.apply(colors=32)
-    session.apply(min_island_size=4)
+    session.apply(pixel_width=4)
 
     restored = session.undo()
     assert restored.colors == 32
-    assert restored.min_island_size == 2
+    assert restored.pixel_width == 2
 
     restored = session.undo()
     assert restored.colors == 16
-    assert restored.min_island_size == 2
+    assert restored.pixel_width == 2

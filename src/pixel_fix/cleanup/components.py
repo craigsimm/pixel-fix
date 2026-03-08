@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+from dataclasses import dataclass
 
 from pixel_fix.types import LabelGrid
+
+
+@dataclass(frozen=True)
+class IslandCleanupResult:
+    labels: LabelGrid
+    replaced_pixels: int
 
 
 def _neighbors(y: int, x: int, h: int, w: int, connectivity: int) -> list[tuple[int, int]]:
@@ -18,8 +25,12 @@ def _neighbors(y: int, x: int, h: int, w: int, connectivity: int) -> list[tuple[
 
 
 def remove_small_islands(labels: LabelGrid, min_size: int, connectivity: int = 4) -> LabelGrid:
+    return remove_small_islands_detailed(labels, min_size=min_size, connectivity=connectivity).labels
+
+
+def remove_small_islands_detailed(labels: LabelGrid, min_size: int, connectivity: int = 4) -> IslandCleanupResult:
     if min_size <= 1:
-        return [row[:] for row in labels]
+        return IslandCleanupResult(labels=[row[:] for row in labels], replaced_pixels=0)
     if connectivity not in {4, 8}:
         raise ValueError("connectivity must be 4 or 8")
 
@@ -27,6 +38,7 @@ def remove_small_islands(labels: LabelGrid, min_size: int, connectivity: int = 4
     w = len(labels[0]) if h else 0
     out = [row[:] for row in labels]
     visited = [[False] * w for _ in range(h)]
+    replaced_pixels = 0
 
     for y in range(h):
         for x in range(w):
@@ -59,5 +71,6 @@ def remove_small_islands(labels: LabelGrid, min_size: int, connectivity: int = 4
             replacement = Counter(neighbor_labels).most_common(1)[0][0]
             for cy, cx in comp:
                 out[cy][cx] = replacement
+            replaced_pixels += len(comp)
 
-    return out
+    return IslandCleanupResult(labels=out, replaced_pixels=replaced_pixels)
