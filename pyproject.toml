@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixel-fix"
+version = "0.1.0"
+description = "Clean and recover editable pixel art from AI-generated pixel-art-like images"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "pixel-fix contributors" }]
+dependencies = []
+
+[project.scripts]
+pixel-fix = "pixel_fix.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
