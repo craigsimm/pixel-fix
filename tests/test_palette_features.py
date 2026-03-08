@@ -29,6 +29,36 @@ def test_palette_io_roundtrip(tmp_path: Path) -> None:
     assert loaded == [0x112233, 0xABCDEF]
 
 
+def test_gpl_palette_loads_with_comments_and_headers(tmp_path: Path) -> None:
+    path = tmp_path / "palette.gpl"
+    path.write_text(
+        "\n".join(
+            (
+                "GIMP Palette",
+                "Name: Example",
+                "Columns: 2",
+                "# comment",
+                "17 34 51 First",
+                "171 205 239 Second",
+            )
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_palette(path)
+    assert loaded == [0x112233, 0xABCDEF]
+
+
+def test_gpl_palette_rejects_invalid_colour_lines(tmp_path: Path) -> None:
+    path = tmp_path / "broken.gpl"
+    path.write_text("GIMP Palette\nnot-a-colour\n", encoding="utf-8")
+    try:
+        load_palette(path)
+    except ValueError as exc:
+        assert "Invalid GPL palette" in str(exc)
+    else:
+        raise AssertionError("Expected invalid GPL data to raise ValueError")
+
+
 def test_quantizer_and_dither_pipeline_bits() -> None:
     labels = [[0x010101, 0xFEFEFE], [0x101010, 0xEEEEEE]]
     palette = generate_palette(labels, colors=2, method="kmeans")

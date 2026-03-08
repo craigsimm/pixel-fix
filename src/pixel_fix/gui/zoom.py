@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-ZOOM_PRESETS = (100, 200, 400, 800)
+ZOOM_PRESETS = (25, 50, 100, 200, 400, 800, 1600)
 
 
 def clamp_zoom(value: int) -> int:

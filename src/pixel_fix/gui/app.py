@@ -1,402 +1,1250 @@
 from __future__ import annotations
 
+import sys
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from PIL import Image, ImageDraw, ImageTk
+
 from pixel_fix.palette.color_modes import extract_unique_colors
 from pixel_fix.palette.io import load_palette, save_palette
+from pixel_fix.palette.catalog import PaletteCatalogEntry, discover_palette_catalog
 from pixel_fix.palette.quantize import generate_palette
 from pixel_fix.pipeline import PipelineConfig
+from pixel_fix.resample import resize_labels, target_size_for_pixel_width
 
-from .processing import RGBGrid, render_preview, rgb_to_labels
+from .persist import (
+    append_process_log,
+    deserialize_settings,
+    diff_snapshots,
+    load_app_state,
+    make_process_snapshot,
+    save_app_state,
+    serialize_settings,
+)
+from .processing import (
+    ProcessResult,
+    RGBGrid,
+    display_resize_method,
+    downsample_image,
+    grid_to_pil_image,
+    labels_to_rgb,
+    load_png_grid,
+    load_png_rgba_image,
+    reduce_palette_image,
+    rgb_to_labels,
+)
 from .state import PreviewSettings, SettingsSession
-from .zoom import ZOOM_PRESETS, choose_fit_zoom, zoom_in, zoom_out
+from .zoom import ZOOM_PRESETS, choose_fit_zoom, clamp_zoom, zoom_in, zoom_out
+
+OPEN_HAND_CURSOR = "hand2"
+CLOSED_HAND_CURSOR = "fleur"
+MAX_PALETTE_SWATCHES = 256
+PALETTE_SWATCH_SIZE = 18
+PALETTE_SWATCH_GAP = 4
+MAX_RECENT_FILES = 10
+
+RESIZE_OPTIONS = (
+    ("Nearest Neighbor", "nearest"),
+    ("Bilinear Interpolation", "bilinear"),
+    ("RotSprite", "rotsprite"),
+)
+QUANTIZER_OPTIONS = (
+    ("Fast top colours (topk)", "topk"),
+    ("Clustered colours (k-means)", "kmeans"),
+)
+DITHER_OPTIONS = (
+    ("None", "none"),
+    ("Floyd-Steinberg", "floyd-steinberg"),
+    ("Ordered (Bayer)", "ordered"),
+)
+COLOR_MODE_OPTIONS = (
+    ("RGBA", "rgba"),
+    ("Indexed", "indexed"),
+    ("Grayscale", "grayscale"),
+)
+
+RESIZE_DISPLAY_TO_VALUE = {label: value for (label, value) in RESIZE_OPTIONS}
+RESIZE_VALUE_TO_DISPLAY = {value: label for (label, value) in RESIZE_OPTIONS}
+QUANTIZER_DISPLAY_TO_VALUE = {label: value for (label, value) in QUANTIZER_OPTIONS}
+QUANTIZER_VALUE_TO_DISPLAY = {value: label for (label, value) in QUANTIZER_OPTIONS}
+DITHER_DISPLAY_TO_VALUE = {label: value for (label, value) in DITHER_OPTIONS}
+DITHER_VALUE_TO_DISPLAY = {value: label for (label, value) in DITHER_OPTIONS}
+COLOR_MODE_DISPLAY_TO_VALUE = {label: value for (label, value) in COLOR_MODE_OPTIONS}
+COLOR_MODE_VALUE_TO_DISPLAY = {value: label for (label, value) in COLOR_MODE_OPTIONS}
+
+
+@dataclass
+class CanvasDisplay:
+    image_left: int
+    image_top: int
+    display_width: int
+    display_height: int
+    sample_image: Image.Image | None
+
+
+@dataclass
+class PaletteUndoState:
+    palette_result: ProcessResult | None
+    palette_display_image: Image.Image | None
+    image_state: str
+    last_successful_process_snapshot: dict[str, object] | None
 
 
 class PixelFixGui:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Pixel-Fix Preview")
-        self.root.geometry("1260x860")
+        self.root.title("Pixel-Fix")
+        self.root.geometry("1380x920")
+        self._configure_window_icon()
 
-        self.session = SettingsSession()
-        self.original_grid: RGBGrid | None = None
-        self.preview_grid: RGBGrid | None = None
+        persisted = load_app_state()
+        self.session = SettingsSession(deserialize_settings(persisted.get("settings")))
         self.source_path: Path | None = None
-        self.render_version = 0
+        self.original_grid: RGBGrid | None = None
+        self.original_display_image: Image.Image | None = None
+        self.downsample_result: ProcessResult | None = None
+        self.palette_result: ProcessResult | None = None
+        self.downsample_display_image: Image.Image | None = None
+        self.palette_display_image: Image.Image | None = None
+        self.comparison_original_image: Image.Image | None = None
+        self._comparison_original_key: tuple[object, ...] | None = None
+        self.prepared_input_cache = None
+        self.prepared_input_cache_key: tuple[object, ...] | None = None
         self.active_palette: list[int] | None = None
+        self.active_palette_source = ""
+        self.active_palette_path: str | None = None
+        self.builtin_palette_entries = discover_palette_catalog(self._resource_path("palettes"))
+        self._builtin_palette_by_path = {str(entry.path): entry for entry in self.builtin_palette_entries}
+        self.last_output_path = persisted.get("last_output_path")
+        self.last_successful_process_snapshot = persisted.get("last_successful_process_snapshot")
+        self.recent_files = self._normalize_recent_files(persisted.get("recent_files"))
+        self.image_state = "loaded_original"
 
-        self.zoom = 100
-        self.zoom_var = tk.IntVar(value=self.zoom)
-        self.view_var = tk.StringVar(value="processed")
-        self.status_var = tk.StringVar(value="Open a PNG image to begin.")
+        self.zoom = clamp_zoom(int(persisted.get("zoom", 100)))
+        self.pan_x = 0
+        self.pan_y = 0
+        self.dragging = False
+        self.drag_origin = (0, 0)
+        self.drag_pan_start = (0, 0)
+        self.quick_compare_active = False
+        self._display_context: CanvasDisplay | None = None
+        self._image_ref: ImageTk.PhotoImage | None = None
+        self._persist_after_id: str | None = None
+        self._suspend_control_events = False
+        self._palette_undo_state: PaletteUndoState | None = None
 
-        self._image_ref: tk.PhotoImage | None = None
-        self._debounce_id: str | None = None
+        self.view_var = tk.StringVar(value=str(persisted.get("view_mode", "original")))
+        if self.view_var.get() not in {"original", "processed"}:
+            self.view_var.set("original")
+        self.pixel_width_var = tk.IntVar()
+        self.downsample_mode_var = tk.StringVar()
+        self.colors_var = tk.IntVar()
+        self.input_mode_var = tk.StringVar()
+        self.output_mode_var = tk.StringVar()
+        self.quantizer_var = tk.StringVar()
+        self.dither_var = tk.StringVar()
+        self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
+        self.pixel_grid_var = tk.BooleanVar(value=bool(persisted.get("pixel_grid", False)))
+        self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
+        self.scale_info_var = tk.StringVar(value="Open an image to set the pixel size.")
+        self.palette_info_var = tk.StringVar(value="Palette: none")
+        self.image_info_var = tk.StringVar(value="No image  -  100%")
 
+        self._menu_items: dict[str, tk.Menu] = {}
+        self._build_menu_bar()
         self._build_layout()
+        self._sync_controls_from_settings(self.session.current)
+        palette_restore_needs_persist = self._restore_active_palette(persisted)
+        self._update_scale_info()
+        self._update_palette_strip()
+        self._update_image_info()
+        self._refresh_action_states()
+        if palette_restore_needs_persist:
+            self._schedule_state_persist()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _configure_window_icon(self) -> None:
+        ico_path = self._resource_path("pixel-fix.ico")
+        if ico_path.exists():
+            try:
+                self.root.iconbitmap(default=str(ico_path))
+            except tk.TclError:
+                pass
+        icon_path = self._resource_path("ico-32.png")
+        if icon_path.exists():
+            try:
+                self.root.iconphoto(True, tk.PhotoImage(file=str(icon_path)))
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _resource_path(name: str) -> Path:
+        if hasattr(sys, "_MEIPASS"):
+            return Path(getattr(sys, "_MEIPASS")) / name
+        return Path(__file__).resolve().parents[3] / name
+
+    def _build_menu_bar(self) -> None:
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_image)
+        self.recent_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="Recent", menu=self.recent_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_processed_image)
+        file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_processed_image_as)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", accelerator="Alt+F4", command=self._on_close)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        edit_menu = tk.Menu(menubar, tearoff=False)
+        edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo)
+        edit_menu.add_command(label="Downsample", accelerator="F5", command=self.downsample_current_image)
+        edit_menu.add_command(label="Apply Palette", accelerator="F6", command=self.reduce_palette_current_image)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_radiobutton(label="Original", value="original", variable=self.view_var, accelerator="Ctrl+1", command=self._on_view_changed)
+        view_menu.add_radiobutton(label="Processed", value="processed", variable=self.view_var, accelerator="Ctrl+2", command=self._on_view_changed)
+        menubar.add_cascade(label="View", menu=view_menu)
+
+        palette_menu = tk.Menu(menubar, tearoff=False)
+        input_menu = tk.Menu(palette_menu, tearoff=False)
+        for label, _value in COLOR_MODE_OPTIONS:
+            input_menu.add_radiobutton(label=label, value=label, variable=self.input_mode_var, command=self._on_settings_changed)
+        output_menu = tk.Menu(palette_menu, tearoff=False)
+        for label, _value in COLOR_MODE_OPTIONS:
+            output_menu.add_radiobutton(label=label, value=label, variable=self.output_mode_var, command=self._on_settings_changed)
+        built_in_menu = tk.Menu(palette_menu, tearoff=False)
+        palette_menu.add_cascade(label="Input Mode", menu=input_menu)
+        palette_menu.add_cascade(label="Output Mode", menu=output_menu)
+        palette_menu.add_separator()
+        palette_menu.add_cascade(label="Built-in Palettes", menu=built_in_menu)
+        palette_menu.add_command(label="Load Palette...", command=self.load_palette_file)
+        palette_menu.add_command(label="Save Palette...", command=self.save_palette_file)
+        palette_menu.add_command(label="Clear Active Palette", command=self.clear_active_palette)
+        menubar.add_cascade(label="Palette", menu=palette_menu)
+
+        zoom_menu = tk.Menu(menubar, tearoff=False)
+        for value in ZOOM_PRESETS:
+            zoom_menu.add_command(label=f"{value}%", command=lambda zoom=value: self._set_zoom(zoom))
+        zoom_menu.add_separator()
+        zoom_menu.add_command(label="Fit", accelerator="Ctrl+0", command=self.zoom_fit)
+        menubar.add_cascade(label="Zoom", menu=zoom_menu)
+
+        preferences_menu = tk.Menu(menubar, tearoff=False)
+        resize_menu = tk.Menu(preferences_menu, tearoff=False)
+        for label, _value in RESIZE_OPTIONS:
+            resize_menu.add_radiobutton(label=label, value=label, variable=self.downsample_mode_var, command=self._on_settings_changed)
+        quantizer_menu = tk.Menu(preferences_menu, tearoff=False)
+        for label, _value in QUANTIZER_OPTIONS:
+            quantizer_menu.add_radiobutton(label=label, value=label, variable=self.quantizer_var, command=self._on_settings_changed)
+        dither_menu = tk.Menu(preferences_menu, tearoff=False)
+        for label, _value in DITHER_OPTIONS:
+            dither_menu.add_radiobutton(label=label, value=label, variable=self.dither_var, command=self._on_settings_changed)
+        preferences_menu.add_checkbutton(label="Checkerboard background", variable=self.checkerboard_var, command=self._on_overlay_changed)
+        preferences_menu.add_checkbutton(label="Pixel grid overlay", variable=self.pixel_grid_var, command=self._on_overlay_changed)
+        preferences_menu.add_separator()
+        preferences_menu.add_cascade(label="Resize Method", menu=resize_menu)
+        preferences_menu.add_cascade(label="Palette Reduction", menu=quantizer_menu)
+        preferences_menu.add_cascade(label="Dithering", menu=dither_menu)
+        menubar.add_cascade(label="Preferences", menu=preferences_menu)
+
+        self.root.config(menu=menubar)
+        self._menu_items["file"] = file_menu
+        self._menu_items["edit"] = edit_menu
+        self._menu_items["view"] = view_menu
+        self._menu_items["palette"] = palette_menu
+        self._menu_items["palette_input"] = input_menu
+        self._menu_items["palette_output"] = output_menu
+        self._menu_items["built_in_palettes"] = built_in_menu
+        self._menu_items["preferences"] = preferences_menu
+        self._menu_items["preferences_resize"] = resize_menu
+        self._menu_items["preferences_quantizer"] = quantizer_menu
+        self._menu_items["preferences_dither"] = dither_menu
+        self._populate_builtin_palette_menu()
+        self._refresh_recent_menu()
 
     def _build_layout(self) -> None:
-        top = ttk.Frame(self.root)
-        top.pack(fill=tk.X, padx=8, pady=8)
-
-        ttk.Button(top, text="Open Image", command=self.open_image).pack(side=tk.LEFT)
-        ttk.Button(top, text="Undo", command=self.undo).pack(side=tk.LEFT, padx=(6, 0))
-
-        ttk.Label(top, text="View:").pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Combobox(top, textvariable=self.view_var, values=("processed", "original"), state="readonly", width=10).pack(side=tk.LEFT)
-        self.view_var.trace_add("write", lambda *_: self.redraw_canvas())
-
-        ttk.Label(top, text="Zoom:").pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Combobox(top, textvariable=self.zoom_var, values=ZOOM_PRESETS, state="readonly", width=6).pack(side=tk.LEFT)
-        self.zoom_var.trace_add("write", lambda *_: self._apply_zoom(self.zoom_var.get()))
-
-        ttk.Button(top, text="-", width=3, command=self.zoom_step_out).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(top, text="+", width=3, command=self.zoom_step_in).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Button(top, text="Fit", command=self.zoom_fit).pack(side=tk.LEFT, padx=(6, 0))
-
         body = ttk.Frame(self.root)
-        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        controls = ttk.LabelFrame(body, text="Tweaks")
-        controls.pack(side=tk.LEFT, fill=tk.Y)
+        sidebar = ttk.Frame(body, width=360)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        sidebar.pack_propagate(False)
 
-        self.grid_var = tk.StringVar(value="auto")
-        self.pixel_width_var = tk.StringVar(value="")
-        self.colors_var = tk.IntVar(value=16)
-        self.sampler_var = tk.StringVar(value="mode")
-        self.min_island_var = tk.IntVar(value=2)
-        self.bridge_var = tk.BooleanVar(value=False)
-        self.line_color_var = tk.StringVar(value="0")
+        scale_section = self._create_section(sidebar, "1. Determine pixel scale")
+        row = ttk.Frame(scale_section)
+        row.pack(fill=tk.X)
+        ttk.Label(row, text="Pixel size").pack(side=tk.LEFT)
+        self.pixel_width_spinbox = ttk.Spinbox(row, from_=1, to=512, textvariable=self.pixel_width_var, width=8, command=self._on_settings_changed)
+        self.pixel_width_spinbox.pack(side=tk.RIGHT)
+        ttk.Label(scale_section, textvariable=self.scale_info_var, wraplength=300).pack(anchor=tk.W, pady=(6, 0))
 
-        self.input_mode_var = tk.StringVar(value="rgba")
-        self.output_mode_var = tk.StringVar(value="rgba")
-        self.quantizer_var = tk.StringVar(value="topk")
-        self.dither_var = tk.StringVar(value="none")
+        downsample_section = self._create_section(sidebar, "2. Downsample")
+        self.downsample_button = tk.Button(downsample_section, text="Downsample", command=self.downsample_current_image, bg="#2d7d46", fg="white", relief=tk.FLAT, padx=14, pady=4)
+        self.downsample_button.pack(anchor=tk.W, pady=(4, 0))
 
-        self.replace_enabled_var = tk.BooleanVar(value=False)
-        self.replace_src_var = tk.StringVar(value="")
-        self.replace_dst_var = tk.StringVar(value="")
-        self.replace_tol_var = tk.IntVar(value=0)
+        palette_section = self._create_section(sidebar, "3. Apply palette")
+        row = ttk.Frame(palette_section)
+        row.pack(fill=tk.X)
+        ttk.Label(row, text="Target colours").pack(side=tk.LEFT)
+        self.colors_spinbox = ttk.Spinbox(row, from_=2, to=256, textvariable=self.colors_var, width=8, command=self._on_settings_changed)
+        self.colors_spinbox.pack(side=tk.RIGHT)
+        self.reduce_palette_button = tk.Button(palette_section, text="Apply Palette", command=self.reduce_palette_current_image, bg="#2d7d46", fg="white", relief=tk.FLAT, padx=14, pady=4)
+        self.reduce_palette_button.pack(anchor=tk.W, pady=(8, 0))
 
-        self._add_combo(controls, "Grid", self.grid_var, ("auto", "hough", "fft", "divisor"))
-        self._add_entry(controls, "Pixel width", self.pixel_width_var)
-        self._add_spin(controls, "Colors", self.colors_var, 2, 256)
-        self._add_combo(controls, "Sampler", self.sampler_var, ("mode", "median"))
-        self._add_spin(controls, "Min island", self.min_island_var, 1, 32)
-        self._add_combo(controls, "Input mode", self.input_mode_var, ("rgba", "indexed", "grayscale"))
-        self._add_combo(controls, "Output mode", self.output_mode_var, ("rgba", "indexed", "grayscale"))
-        self._add_combo(controls, "Quantizer", self.quantizer_var, ("topk", "kmeans"))
-        self._add_combo(controls, "Dithering", self.dither_var, ("none", "floyd-steinberg", "ordered"))
+        workspace = ttk.Frame(body)
+        workspace.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        line = ttk.Frame(controls)
-        line.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Checkbutton(line, text="Bridge 1px gaps", variable=self.bridge_var, command=self._on_settings_changed).pack(side=tk.LEFT)
-        self._add_entry(controls, "Line color", self.line_color_var)
+        palette_frame = ttk.LabelFrame(workspace, text="Current palette")
+        palette_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(palette_frame, textvariable=self.palette_info_var).pack(anchor=tk.W, padx=8, pady=(6, 2))
+        self.palette_canvas = tk.Canvas(palette_frame, height=60, background="#1e1e1e", highlightthickness=0)
+        self.palette_canvas.pack(fill=tk.X, padx=8, pady=(0, 8))
 
-        repl = ttk.LabelFrame(controls, text="Color Replacement")
-        repl.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Checkbutton(repl, text="Enable", variable=self.replace_enabled_var, command=self._on_settings_changed).pack(anchor=tk.W, padx=4, pady=2)
-        self._add_entry(repl, "From (#RRGGBB)", self.replace_src_var)
-        self._add_entry(repl, "To (#RRGGBB)", self.replace_dst_var)
-        self._add_spin(repl, "Tolerance", self.replace_tol_var, 0, 255)
-
-        palette_actions = ttk.LabelFrame(controls, text="Palette")
-        palette_actions.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Button(palette_actions, text="Extract Unique", command=self.extract_unique_palette).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(palette_actions, text="Generate Limited", command=self.generate_palette_from_image).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(palette_actions, text="Load Palette", command=self.load_palette_file).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(palette_actions, text="Save Palette", command=self.save_palette_file).pack(fill=tk.X, padx=4, pady=2)
-
-        for variable in (
-            self.grid_var,
-            self.pixel_width_var,
-            self.colors_var,
-            self.sampler_var,
-            self.min_island_var,
-            self.line_color_var,
-            self.input_mode_var,
-            self.output_mode_var,
-            self.quantizer_var,
-            self.dither_var,
-            self.replace_src_var,
-            self.replace_dst_var,
-            self.replace_tol_var,
-        ):
-            variable.trace_add("write", lambda *_: self._on_settings_changed())
-
-        canvas_wrap = ttk.Frame(body)
-        canvas_wrap.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(canvas_wrap, background="#222")
+        preview_frame = ttk.Frame(workspace)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        self.canvas = tk.Canvas(preview_frame, background="#222", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.canvas.bind("<ButtonPress-1>", self._start_pan)
-        self.canvas.bind("<B1-Motion>", self._pan)
+        zoom_controls = ttk.Frame(preview_frame)
+        zoom_controls.place(relx=1.0, rely=1.0, x=-12, y=-12, anchor=tk.SE)
+        self.zoom_out_button = ttk.Button(zoom_controls, text="-", width=3, command=lambda: self._set_zoom(zoom_out(self.zoom)))
+        self.zoom_out_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.zoom_in_button = ttk.Button(zoom_controls, text="+", width=3, command=lambda: self._set_zoom(zoom_in(self.zoom)))
+        self.zoom_in_button.pack(side=tk.LEFT)
+
+        status = ttk.Frame(self.root)
+        status.pack(fill=tk.X, padx=10, pady=(0, 8))
+        ttk.Label(status, textvariable=self.process_status_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(status, textvariable=self.image_info_var).pack(side=tk.RIGHT)
+
+        self.canvas.bind("<Configure>", lambda _event: self.redraw_canvas())
+        self.canvas.bind("<MouseWheel>", self._on_zoom_wheel)
         self.canvas.bind("<Control-MouseWheel>", self._on_zoom_wheel)
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
+        self.canvas.bind("<ButtonPress-3>", self._on_quick_compare_press)
+        self.canvas.bind("<ButtonRelease-3>", self._on_quick_compare_release)
 
-        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W)
-        status.pack(fill=tk.X, padx=8, pady=(0, 8))
+        for widget in (self.pixel_width_spinbox, self.colors_spinbox):
+            widget.bind("<KeyRelease>", self._on_settings_changed, add="+")
+            widget.bind("<<Increment>>", self._on_settings_changed, add="+")
+            widget.bind("<<Decrement>>", self._on_settings_changed, add="+")
 
-    def _add_combo(self, parent: ttk.Widget, label: str, variable: tk.StringVar, values: tuple[str, ...]) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row, text=label, width=16).pack(side=tk.LEFT)
-        ttk.Combobox(row, textvariable=variable, values=values, state="readonly", width=14).pack(side=tk.RIGHT)
+        self._bind_shortcuts()
 
-    def _add_entry(self, parent: ttk.Widget, label: str, variable: tk.StringVar) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row, text=label, width=16).pack(side=tk.LEFT)
-        ttk.Entry(row, textvariable=variable, width=16).pack(side=tk.RIGHT)
+    def _create_section(self, parent: ttk.Frame, title: str) -> ttk.LabelFrame:
+        frame = ttk.LabelFrame(parent, text=title)
+        frame.pack(fill=tk.X, pady=(0, 10))
+        return frame
 
-    def _add_spin(self, parent: ttk.Widget, label: str, variable: tk.IntVar, min_value: int, max_value: int) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row, text=label, width=16).pack(side=tk.LEFT)
-        ttk.Spinbox(row, from_=min_value, to=max_value, textvariable=variable, width=8).pack(side=tk.RIGHT)
+    def _bind_shortcuts(self) -> None:
+        self.root.bind("<Control-o>", lambda _event: self.open_image())
+        self.root.bind("<Control-s>", lambda _event: self.save_processed_image())
+        self.root.bind("<Control-S>", lambda _event: self.save_processed_image_as())
+        self.root.bind("<Control-z>", lambda _event: self.undo())
+        self.root.bind("<F5>", lambda _event: self.downsample_current_image())
+        self.root.bind("<F6>", lambda _event: self.reduce_palette_current_image())
+        self.root.bind("<Control-1>", lambda _event: self._set_view("original"))
+        self.root.bind("<Control-2>", lambda _event: self._set_view("processed"))
+        self.root.bind("<Control-0>", lambda _event: self.zoom_fit())
+        self.root.bind("<Control-equal>", lambda _event: self._set_zoom(zoom_in(self.zoom)))
+        self.root.bind("<Control-minus>", lambda _event: self._set_zoom(zoom_out(self.zoom)))
 
     def open_image(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("PNG images", "*.png")])
-        if not path:
-            return
+        if path:
+            self._open_image_path(Path(path))
+
+    def _open_image_path(self, path: Path) -> None:
         try:
-            self.source_path = Path(path)
-            self.original_grid = self._load_png_grid(self.source_path)
-            self.preview_grid = self.original_grid
-            self.status_var.set(f"Loaded {self.source_path.name}: {len(self.original_grid[0])}x{len(self.original_grid)}")
+            preserve_palette = self.active_palette_path is not None and self.active_palette is not None
+            preserved_palette = list(self.active_palette) if preserve_palette and self.active_palette is not None else None
+            preserved_source = self.active_palette_source if preserve_palette else ""
+            preserved_path = self.active_palette_path if preserve_palette else None
+            self.source_path = path
+            self.original_grid = load_png_grid(str(path))
+            self.original_display_image = load_png_rgba_image(str(path))
+            self.downsample_result = None
+            self.palette_result = None
+            self.downsample_display_image = None
+            self.palette_display_image = None
+            self.comparison_original_image = None
+            self._comparison_original_key = None
+            self.prepared_input_cache = None
+            self.prepared_input_cache_key = None
+            self._clear_palette_undo_state()
+            self._set_active_palette(preserved_palette, preserved_source, preserved_path)
+            self.quick_compare_active = False
+            self.pan_x = 0
+            self.pan_y = 0
+            self.image_state = "loaded_original"
+            self._record_recent_file(path)
+            self._set_view("original")
+            self.process_status_var.set(
+                f"Loaded {path.name}: {self.original_display_image.width}x{self.original_display_image.height}. Adjust the pixel size, then click Downsample."
+            )
+            self.root.update_idletasks()
+            self.zoom_fit()
+            self._update_scale_info()
+            self._update_palette_strip()
             self.redraw_canvas()
-            self.schedule_preview_render()
+            self._refresh_action_states()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Failed to load image", str(exc))
 
-    def extract_unique_palette(self) -> None:
-        if self.original_grid is None:
+    def _refresh_recent_menu(self) -> None:
+        self.recent_menu.delete(0, tk.END)
+        if not self.recent_files:
+            self.recent_menu.add_command(label="(empty)", state=tk.DISABLED)
             return
-        labels = rgb_to_labels(self.original_grid)
-        self.active_palette = extract_unique_colors(labels)
-        self.status_var.set(f"Extracted {len(self.active_palette)} unique colors")
-        self.schedule_preview_render()
+        for path in self.recent_files:
+            self.recent_menu.add_command(label=path, command=lambda value=path: self._open_recent(value))
+
+    def _open_recent(self, path_value: str) -> None:
+        path = Path(path_value)
+        if not path.exists():
+            messagebox.showwarning("Missing file", f"Recent file not found:\n{path}")
+            self.recent_files = [item for item in self.recent_files if item != path_value]
+            self._refresh_recent_menu()
+            self._schedule_state_persist()
+            return
+        self._open_image_path(path)
+
+    def _record_recent_file(self, path: Path) -> None:
+        normalized = str(path)
+        self.recent_files = [item for item in self.recent_files if item != normalized]
+        self.recent_files.insert(0, normalized)
+        self.recent_files = self.recent_files[:MAX_RECENT_FILES]
+        self._refresh_recent_menu()
+        self._schedule_state_persist()
+
+    def _populate_builtin_palette_menu(self) -> None:
+        menu = self._menu_items["built_in_palettes"]
+        menu.delete(0, tk.END)
+        if not self.builtin_palette_entries:
+            menu.add_command(label="(none)", state=tk.DISABLED)
+            return
+
+        submenus: dict[tuple[str, ...], tk.Menu] = {(): menu}
+        for entry in self.builtin_palette_entries:
+            parent_path: tuple[str, ...] = ()
+            parent_menu = menu
+            for folder_label in entry.menu_path:
+                parent_path = (*parent_path, folder_label)
+                if parent_path not in submenus:
+                    submenu = tk.Menu(parent_menu, tearoff=False)
+                    parent_menu.add_cascade(label=folder_label, menu=submenu)
+                    submenus[parent_path] = submenu
+                parent_menu = submenus[parent_path]
+            parent_menu.add_command(label=entry.label, command=lambda value=entry: self._select_builtin_palette(value))
+
+    def _restore_active_palette(self, persisted: dict[str, object]) -> bool:
+        path_value = persisted.get("active_palette_path")
+        if not isinstance(path_value, str) or not path_value:
+            return False
+
+        resolved_path = self._resolve_palette_path(path_value)
+        if resolved_path is None:
+            self._set_active_palette(None, "", None)
+            return True
+
+        entry = self._builtin_palette_by_path.get(resolved_path)
+        try:
+            palette = list(entry.colors) if entry is not None else load_palette(Path(resolved_path))
+        except Exception:  # noqa: BLE001
+            self._set_active_palette(None, "", None)
+            return True
+
+        source_value = persisted.get("active_palette_source")
+        if entry is not None:
+            source = f"Built-in: {entry.source_label}"
+        elif isinstance(source_value, str) and source_value:
+            source = source_value
+        else:
+            source = f"Loaded: {Path(resolved_path).name}"
+        self._set_active_palette(palette, source, resolved_path)
+        return False
+
+    @staticmethod
+    def _resolve_palette_path(path_value: str | Path | None) -> str | None:
+        if path_value in (None, ""):
+            return None
+        path = Path(path_value)
+        if not path.exists():
+            return None
+        return str(path.resolve())
+
+    def _set_active_palette(
+        self,
+        palette: list[int] | tuple[int, ...] | None,
+        source: str,
+        path_value: str | None,
+    ) -> None:
+        self.active_palette = list(palette) if palette else None
+        self.active_palette_source = source
+        self.active_palette_path = path_value
+
+    def _apply_active_palette(
+        self,
+        palette: list[int] | tuple[int, ...] | None,
+        source: str,
+        path_value: str | None,
+        *,
+        message: str | None,
+        mark_stale: bool = True,
+    ) -> None:
+        self._set_active_palette(palette, source, path_value)
+        self._clear_palette_undo_state()
+        if mark_stale:
+            self._mark_output_stale(message)
+        elif message:
+            self.process_status_var.set(message)
+        self._update_palette_strip()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
+    def _select_builtin_palette(self, entry: PaletteCatalogEntry) -> None:
+        message = f"Selected built-in palette {entry.label} ({len(entry.colors)} colours). Click Apply Palette to use it."
+        self._apply_active_palette(
+            entry.colors,
+            f"Built-in: {entry.source_label}",
+            str(entry.path),
+            message=message,
+        )
+
+    def clear_active_palette(self) -> None:
+        if not self.active_palette:
+            return
+        self._apply_active_palette(None, "", None, message="Cleared the active palette.")
+
+    def extract_unique_palette(self) -> None:
+        source_grid = self._palette_source_grid()
+        if source_grid is None:
+            return
+        palette = extract_unique_colors(rgb_to_labels(source_grid))
+        self._apply_active_palette(
+            palette,
+            "Extracted",
+            None,
+            message=f"Extracted {len(palette)} colours. Click Apply Palette to update the preview.",
+        )
 
     def generate_palette_from_image(self) -> None:
-        if self.original_grid is None:
+        source_grid = self._palette_source_grid()
+        if source_grid is None:
             return
-        labels = rgb_to_labels(self.original_grid)
-        self.active_palette = generate_palette(labels, colors=max(2, int(self.colors_var.get())), method=self.quantizer_var.get())
-        self.status_var.set(f"Generated palette with {len(self.active_palette)} colors")
-        self.schedule_preview_render()
+        settings = self._read_settings_from_controls(strict=False)
+        palette = generate_palette(rgb_to_labels(source_grid), colors=settings.colors, method=settings.quantizer)
+        self._apply_active_palette(
+            palette,
+            "Generated",
+            None,
+            message=f"Generated a {len(palette)}-colour palette. Click Apply Palette to update the preview.",
+        )
 
     def load_palette_file(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("Palette JSON", "*.json")])
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("Palette files", "*.json *.gpl"),
+                ("GIMP Palette", "*.gpl"),
+                ("Palette JSON", "*.json"),
+            ]
+        )
         if not path:
             return
         try:
-            self.active_palette = load_palette(Path(path))
-            self.status_var.set(f"Loaded palette with {len(self.active_palette)} colors")
-            self.schedule_preview_render()
+            palette = load_palette(Path(path))
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Failed to load palette", str(exc))
+            return
+        resolved_path = self._resolve_palette_path(path) or str(Path(path))
+        self._apply_active_palette(
+            palette,
+            f"Loaded: {Path(path).name}",
+            resolved_path,
+            message=f"Loaded palette from {Path(path).name}. Click Apply Palette to update the preview.",
+        )
 
     def save_palette_file(self) -> None:
         if not self.active_palette:
-            messagebox.showwarning("No palette", "Extract or generate a palette first.")
             return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Palette JSON", "*.json")])
         if not path:
             return
-        save_palette(Path(path), self.active_palette)
-        self.status_var.set(f"Saved palette to {Path(path).name}")
+        try:
+            save_palette(Path(path), self.active_palette)
+            self.process_status_var.set(f"Saved palette to {Path(path).name}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Failed to save palette", str(exc))
 
-    def _load_png_grid(self, path: Path) -> RGBGrid:
-        img = tk.PhotoImage(file=str(path))
-        width, height = img.width(), img.height()
-        grid: RGBGrid = []
-        for y in range(height):
-            row: list[tuple[int, int, int]] = []
-            for x in range(width):
-                pixel = img.get(x, y)
-                if isinstance(pixel, tuple):
-                    r, g, b = pixel[:3]
-                else:
-                    r, g, b = self.root.winfo_rgb(pixel)
-                    r //= 256
-                    g //= 256
-                    b //= 256
-                row.append((int(r), int(g), int(b)))
-            grid.append(row)
-        return grid
-
-    def _grid_to_photoimage(self, grid: RGBGrid) -> tk.PhotoImage:
-        height = len(grid)
-        width = len(grid[0]) if height else 0
-        image = tk.PhotoImage(width=width, height=height)
-        for y, row in enumerate(grid):
-            color_row = "{" + " ".join(f"#{r:02x}{g:02x}{b:02x}" for (r, g, b) in row) + "}"
-            image.put(color_row, to=(0, y))
-        return image
-
-    def _get_active_grid(self) -> RGBGrid | None:
-        if self.view_var.get() == "original":
-            return self.original_grid
-        return self.preview_grid or self.original_grid
-
-    def redraw_canvas(self) -> None:
-        grid = self._get_active_grid()
-        if not grid:
+    def downsample_current_image(self) -> None:
+        if self.original_grid is None or self.source_path is None:
             return
-        image = self._grid_to_photoimage(grid)
-        factor = max(1, self.zoom // 100)
-        zoomed = image.zoom(factor, factor)
-        self._image_ref = zoomed
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, image=zoomed, anchor=tk.NW)
-        self.canvas.configure(scrollregion=(0, 0, zoomed.width(), zoomed.height()))
-
-    def _on_settings_changed(self) -> None:
-        if self.original_grid is None:
+        try:
+            settings = self._read_settings_from_controls(strict=True)
+        except ValueError as exc:
+            messagebox.showerror("Invalid settings", str(exc))
             return
-        previous = self.session.current
-        new = PreviewSettings(
-            grid=self.grid_var.get(),
-            pixel_width=self._parse_optional_int(self.pixel_width_var.get()),
-            colors=max(2, int(self.colors_var.get())),
-            cell_sampler=self.sampler_var.get(),
-            min_island_size=max(1, int(self.min_island_var.get())),
-            line_color=self._parse_optional_int(self.line_color_var.get()) if self.bridge_var.get() else None,
-            input_mode=self.input_mode_var.get(),
-            output_mode=self.output_mode_var.get(),
-            quantizer=self.quantizer_var.get(),
-            dither_mode=self.dither_var.get(),
-            replace_src=self._parse_color(self.replace_src_var.get()) if self.replace_enabled_var.get() else None,
-            replace_dst=self._parse_color(self.replace_dst_var.get()) if self.replace_enabled_var.get() else None,
-            replace_tolerance=max(0, int(self.replace_tol_var.get())),
-        )
-        if new != previous:
-            self.session.apply(**new.__dict__)
-            self.schedule_preview_render()
+        self.session.current = settings
+        snapshot = make_process_snapshot(settings, self.active_palette, self.active_palette_path, self.active_palette_source)
+        changes = diff_snapshots(self.last_successful_process_snapshot, snapshot)
+        source_size = (len(self.original_grid[0]), len(self.original_grid)) if self.original_grid else (0, 0)
 
-    @staticmethod
-    def _parse_optional_int(value: str) -> int | None:
-        stripped = value.strip()
-        if not stripped:
-            return None
-        return int(stripped)
+        self.image_state = "processing"
+        self.quick_compare_active = False
+        self.process_status_var.set("Preparing input...")
+        self._refresh_action_states()
+        config = self._build_pipeline_config(settings)
 
-    @staticmethod
-    def _parse_color(value: str) -> int | None:
-        stripped = value.strip()
-        if not stripped:
-            return None
-        if stripped.startswith("#"):
-            stripped = stripped[1:]
-        if len(stripped) != 6:
-            raise ValueError("Color must be #RRGGBB")
-        return int(stripped, 16)
-
-    def schedule_preview_render(self) -> None:
-        if self._debounce_id is not None:
-            self.root.after_cancel(self._debounce_id)
-        self._debounce_id = self.root.after(200, self._start_preview_render)
-
-    def _start_preview_render(self) -> None:
-        if self.original_grid is None:
-            return
-        self.render_version += 1
-        render_id = self.render_version
-        settings = self.session.current
-        self.status_var.set("Rendering preview...")
+        def progress_callback(_percent: int, message: str) -> None:
+            self.root.after(0, lambda: self.process_status_var.set(message))
 
         def worker() -> None:
-            config = PipelineConfig(
-                grid=settings.grid,
-                pixel_width=settings.pixel_width,
-                colors=settings.colors,
-                cell_sampler=settings.cell_sampler,
-                min_island_size=settings.min_island_size,
-                line_color=settings.line_color,
-                input_mode=settings.input_mode,
-                output_mode=settings.output_mode,
-                quantizer=settings.quantizer,
-                dither_mode=settings.dither_mode,
-                replace_src=settings.replace_src,
-                replace_dst=settings.replace_dst,
-                replace_tolerance=settings.replace_tolerance,
-            )
-            preview = render_preview(self.original_grid or [], config, palette_override=self.active_palette)
-            self.root.after(0, lambda: self._apply_render_result(render_id, preview))
+            try:
+                result = downsample_image(self.original_grid or [], config, progress_callback=progress_callback)
+                self.root.after(0, lambda: self._handle_downsample_success(result, snapshot, changes, source_size, self._build_prepare_cache_key(settings)))
+            except Exception as exc:  # noqa: BLE001
+                self.root.after(0, lambda: self._handle_stage_failure(str(exc), changes, source_size))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_render_result(self, render_id: int, preview: RGBGrid) -> None:
-        if render_id != self.render_version:
+    def reduce_palette_current_image(self) -> None:
+        if self.prepared_input_cache is None or self.source_path is None:
+            self.process_status_var.set("Downsample the image before applying a palette.")
             return
-        self.preview_grid = preview
-        if preview:
-            self.status_var.set(f"Preview ready: {len(preview[0])}x{len(preview)} @ {self.zoom}%")
-        self.redraw_canvas()
+        try:
+            settings = self._read_settings_from_controls(strict=True)
+        except ValueError as exc:
+            messagebox.showerror("Invalid settings", str(exc))
+            return
+        self.session.current = settings
+        snapshot = make_process_snapshot(settings, self.active_palette, self.active_palette_path, self.active_palette_source)
+        changes = diff_snapshots(self.last_successful_process_snapshot, snapshot)
+        source_size = (len(self.original_grid[0]), len(self.original_grid)) if self.original_grid else (0, 0)
+        self._capture_palette_undo_state()
+
+        self.image_state = "processing"
+        self.quick_compare_active = False
+        self.process_status_var.set("Applying palette...")
+        self._refresh_action_states()
+        config = self._build_pipeline_config(settings)
+
+        def progress_callback(_percent: int, message: str) -> None:
+            self.root.after(0, lambda: self.process_status_var.set(message))
+
+        def worker() -> None:
+            try:
+                result = reduce_palette_image(self.prepared_input_cache, config, palette_override=self.active_palette, progress_callback=progress_callback)
+                self.root.after(0, lambda: self._handle_palette_success(result, snapshot, changes, source_size))
+            except Exception as exc:  # noqa: BLE001
+                self.root.after(0, lambda: self._handle_stage_failure(str(exc), changes, source_size))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def save_processed_image(self) -> None:
+        if self.image_state != "processed_current":
+            return
+        if not self.last_output_path:
+            self.save_processed_image_as()
+            return
+        self._save_processed_png(Path(self.last_output_path))
+
+    def save_processed_image_as(self) -> None:
+        if self.image_state != "processed_current":
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG images", "*.png")])
+        if not path:
+            return
+        self._save_processed_png(Path(path))
 
     def undo(self) -> None:
-        if not self.session.history.can_undo():
-            self.status_var.set("Nothing to undo.")
+        if self._undo_palette_application():
             return
-        settings = self.session.undo()
-        self._sync_controls_from_settings(settings)
-        self.schedule_preview_render()
+        if not self.session.history.can_undo():
+            self.process_status_var.set("Nothing to undo.")
+            return
+        previous = self.session.current
+        restored = self.session.undo()
+        self._sync_controls_from_settings(restored)
+        self._handle_settings_transition(previous, restored, "Settings restored from undo.")
 
-    def _sync_controls_from_settings(self, settings: PreviewSettings) -> None:
-        self.grid_var.set(settings.grid)
-        self.pixel_width_var.set("" if settings.pixel_width is None else str(settings.pixel_width))
-        self.colors_var.set(settings.colors)
-        self.sampler_var.set(settings.cell_sampler)
-        self.min_island_var.set(settings.min_island_size)
-        self.bridge_var.set(settings.line_color is not None)
-        self.line_color_var.set("" if settings.line_color is None else str(settings.line_color))
-        self.input_mode_var.set(settings.input_mode)
-        self.output_mode_var.set(settings.output_mode)
-        self.quantizer_var.set(settings.quantizer)
-        self.dither_var.set(settings.dither_mode)
-        self.replace_enabled_var.set(settings.replace_src is not None and settings.replace_dst is not None)
-        self.replace_src_var.set("" if settings.replace_src is None else f"#{settings.replace_src:06x}")
-        self.replace_dst_var.set("" if settings.replace_dst is None else f"#{settings.replace_dst:06x}")
-        self.replace_tol_var.set(settings.replace_tolerance)
+    def _capture_palette_undo_state(self) -> None:
+        self._palette_undo_state = PaletteUndoState(
+            palette_result=self.palette_result,
+            palette_display_image=self.palette_display_image.copy() if self.palette_display_image is not None else None,
+            image_state=self.image_state,
+            last_successful_process_snapshot=dict(self.last_successful_process_snapshot) if isinstance(self.last_successful_process_snapshot, dict) else self.last_successful_process_snapshot,
+        )
 
-    def _apply_zoom(self, value: int) -> None:
-        self.zoom = value
+    def _clear_palette_undo_state(self) -> None:
+        self._palette_undo_state = None
+
+    def _undo_palette_application(self) -> bool:
+        if self._palette_undo_state is None:
+            return False
+        state = self._palette_undo_state
+        self.palette_result = state.palette_result
+        self.palette_display_image = state.palette_display_image.copy() if state.palette_display_image is not None else None
+        self.image_state = state.image_state
+        self.last_successful_process_snapshot = (
+            dict(state.last_successful_process_snapshot) if isinstance(state.last_successful_process_snapshot, dict) else state.last_successful_process_snapshot
+        )
+        self.quick_compare_active = False
+        self._clear_palette_undo_state()
+        self.process_status_var.set("Reverted the last palette application.")
+        self._update_palette_strip()
+        self._update_image_info()
+        self.redraw_canvas()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+        return True
+
+    def _handle_downsample_success(
+        self,
+        result: ProcessResult,
+        snapshot: dict[str, object],
+        changes: list[str],
+        source_size: tuple[int, int],
+        cache_key: tuple[object, ...],
+    ) -> None:
+        self.downsample_result = result
+        self.downsample_display_image = grid_to_pil_image(result.grid).convert("RGBA")
+        self.palette_result = None
+        self.palette_display_image = None
+        self.comparison_original_image = None
+        self._comparison_original_key = None
+        self.prepared_input_cache = result.prepared_input
+        self.prepared_input_cache_key = cache_key
+        self.image_state = "processed_current"
+        self.last_successful_process_snapshot = snapshot
+        self._clear_palette_undo_state()
+        self._set_view("processed")
+        self.root.update_idletasks()
+        self.zoom_fit()
+        self.process_status_var.set(
+            f"Downsampled to {result.width}x{result.height} with {display_resize_method(result.stats.resize_method)} in {result.stats.elapsed_seconds:.2f}s."
+        )
+        append_process_log(
+            source_path_value=str(self.source_path),
+            source_size=source_size,
+            processed_size=result.stats.output_size,
+            color_count=result.stats.color_count,
+            changes=changes,
+            success=True,
+            message="Downsample complete",
+        )
+        self._update_palette_strip()
+        self._update_image_info()
+        self.redraw_canvas()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
+    def _handle_palette_success(
+        self,
+        result: ProcessResult,
+        snapshot: dict[str, object],
+        changes: list[str],
+        source_size: tuple[int, int],
+    ) -> None:
+        self.palette_result = result
+        self.palette_display_image = grid_to_pil_image(result.grid).convert("RGBA")
+        self.image_state = "processed_current"
+        self.last_successful_process_snapshot = snapshot
+        self._set_view("processed")
+        self.root.update_idletasks()
+        self.zoom_fit()
+        self.process_status_var.set(f"Applied palette with {result.stats.color_count} colours in {result.stats.elapsed_seconds:.2f}s.")
+        append_process_log(
+            source_path_value=str(self.source_path),
+            source_size=source_size,
+            processed_size=result.stats.output_size,
+            color_count=result.stats.color_count,
+            changes=changes,
+            success=True,
+            message="Palette application complete",
+        )
+        self._update_palette_strip()
+        self._update_image_info()
+        self.redraw_canvas()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
+    def _handle_stage_failure(self, message: str, changes: list[str], source_size: tuple[int, int]) -> None:
+        self._clear_palette_undo_state()
+        self.image_state = "processed_stale" if self._current_output_result() is not None else "loaded_original"
+        self.process_status_var.set(message)
+        append_process_log(
+            source_path_value=str(self.source_path) if self.source_path is not None else "unknown",
+            source_size=source_size,
+            processed_size=None,
+            color_count=None,
+            changes=changes,
+            success=False,
+            message=message,
+        )
+        messagebox.showerror("Processing failed", message)
+        self._refresh_action_states()
+
+    def _save_processed_png(self, path: Path) -> None:
+        image = self._current_output_image()
+        if image is None:
+            return
+        image.convert("RGB").save(path, format="PNG")
+        self.last_output_path = str(path)
+        self.process_status_var.set(f"Saved image to {path.name}")
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
+    def redraw_canvas(self) -> None:
+        self.canvas.delete("all")
+        sample_image = self._get_sample_image()
+        self._display_context = None
+        if sample_image is None:
+            text = "Open an image to begin." if self.original_display_image is None else "Click Downsample to create the resized preview."
+            self.canvas.create_text(max(self.canvas.winfo_width() // 2, 200), max(self.canvas.winfo_height() // 2, 150), text=text, fill="#cfcfcf", font=("Segoe UI", 11))
+            self._update_image_info()
+            return
+
+        base_width = max(1, sample_image.width)
+        base_height = max(1, sample_image.height)
+        display_width = max(1, round(base_width * (self.zoom / 100)))
+        display_height = max(1, round(base_height * (self.zoom / 100)))
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        self._clamp_pan(display_width, display_height, canvas_width, canvas_height)
+        image_left = (canvas_width - display_width) // 2 if display_width <= canvas_width else -self.pan_x
+        image_top = (canvas_height - display_height) // 2 if display_height <= canvas_height else -self.pan_y
+        self._display_context = CanvasDisplay(image_left, image_top, display_width, display_height, sample_image)
+
+        rendered = self._render_display_image(sample_image, display_width, display_height)
+        self._image_ref = ImageTk.PhotoImage(rendered)
+        self.canvas.create_image(image_left, image_top, image=self._image_ref, anchor=tk.NW)
+        self._draw_scale_overlay()
+        self._update_image_info()
+
+    def _render_display_image(self, sample_image: Image.Image, display_width: int, display_height: int) -> Image.Image:
+        background = self._build_background(sample_image.size)
+        composited = Image.alpha_composite(background, sample_image.convert("RGBA"))
+        rendered = composited.resize((display_width, display_height), Image.Resampling.NEAREST)
+        if self.pixel_grid_var.get() and self.zoom >= 400 and sample_image.width > 0 and sample_image.height > 0:
+            draw = ImageDraw.Draw(rendered)
+            cell_width = max(1, display_width // sample_image.width)
+            cell_height = max(1, display_height // sample_image.height)
+            if cell_width >= 4 and cell_height >= 4:
+                for x in range(0, display_width + 1, cell_width):
+                    draw.line((x, 0, x, display_height), fill=(0, 0, 0, 100))
+                for y in range(0, display_height + 1, cell_height):
+                    draw.line((0, y, display_width, y), fill=(0, 0, 0, 100))
+        return rendered
+
+    def _build_background(self, size: tuple[int, int]) -> Image.Image:
+        width, height = size
+        if width <= 0 or height <= 0:
+            return Image.new("RGBA", (1, 1), (34, 34, 34, 255))
+        if not self.checkerboard_var.get():
+            return Image.new("RGBA", size, (34, 34, 34, 255))
+        background = Image.new("RGBA", size, (220, 220, 220, 255))
+        draw = ImageDraw.Draw(background)
+        for y in range(0, height, 8):
+            for x in range(0, width, 8):
+                if ((x // 8) + (y // 8)) % 2 == 0:
+                    draw.rectangle((x, y, x + 7, y + 7), fill=(180, 180, 180, 255))
+        return background
+
+    def _draw_scale_overlay(self) -> None:
+        if not self._scale_overlay_active() or self._display_context is None or self.original_display_image is None:
+            return
+        sample_image = self._display_context.sample_image
+        if sample_image is None:
+            return
+        width, height = sample_image.size
+        step = self._overlay_grid_step(sample_image)
+
+        for image_x in range(0, width + 1, step):
+            x = self._image_x_to_canvas(image_x, width)
+            self.canvas.create_line(x, self._display_context.image_top, x, self._display_context.image_top + self._display_context.display_height, fill="#4cc2ff", width=1)
+        for image_y in range(0, height + 1, step):
+            y = self._image_y_to_canvas(image_y, height)
+            self.canvas.create_line(self._display_context.image_left, y, self._display_context.image_left + self._display_context.display_width, y, fill="#4cc2ff", width=1)
+        self.canvas.create_text(
+            self._display_context.image_left + 8,
+            self._display_context.image_top + 8,
+            anchor=tk.NW,
+            fill="#d8f4ff",
+            font=("Segoe UI", 10, "bold"),
+            text=self.scale_info_var.get(),
+        )
+
+    def _scale_overlay_active(self) -> bool:
+        return self.original_display_image is not None and self._get_effective_view() == "original" and not self.quick_compare_active
+
+    def _overlay_grid_step(self, sample_image: Image.Image) -> int:
+        if sample_image is self.comparison_original_image:
+            return 1
+        return max(1, self.session.current.pixel_width)
+
+    def _get_effective_view(self) -> str:
+        if self.quick_compare_active and self.view_var.get() == "processed":
+            return "original"
+        return self.view_var.get()
+
+    def _get_sample_image(self) -> Image.Image | None:
+        if self.original_display_image is None:
+            return None
+        if self._get_effective_view() == "original":
+            return self._get_comparison_original_image()
+        return self._current_output_image()
+
+    def _current_output_result(self) -> ProcessResult | None:
+        return self.palette_result or self.downsample_result
+
+    def _current_output_image(self) -> Image.Image | None:
+        return self.palette_display_image or self.downsample_display_image
+
+    def _get_comparison_original_image(self) -> Image.Image | None:
+        if self.original_display_image is None:
+            return None
+        current = self._current_output_result()
+        if current is None or self.original_grid is None:
+            return self.original_display_image
+        key = (
+            current.stats.pixel_width,
+            current.stats.resize_method,
+            current.width,
+            current.height,
+        )
+        if self._comparison_original_key != key or self.comparison_original_image is None:
+            resized = resize_labels(
+                rgb_to_labels(self.original_grid),
+                current.stats.pixel_width,
+                method=current.stats.resize_method,
+            )
+            self.comparison_original_image = grid_to_pil_image(labels_to_rgb(resized)).convert("RGBA")
+            self._comparison_original_key = key
+        return self.comparison_original_image
+
+    def _palette_source_grid(self) -> RGBGrid | None:
+        if self.downsample_result is not None:
+            return self.downsample_result.grid
+        return self.original_grid
+
+    def _on_canvas_press(self, event: tk.Event) -> None:
+        if not self._point_is_over_image(event.x, event.y):
+            return
+        self.dragging = True
+        self.drag_origin = (event.x, event.y)
+        self.drag_pan_start = (self.pan_x, self.pan_y)
+        self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
+
+    def _on_canvas_drag(self, event: tk.Event) -> None:
+        if not self.dragging or self._display_context is None:
+            return
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        if self._display_context.display_width > canvas_width:
+            self.pan_x = max(0, self.drag_pan_start[0] - (event.x - self.drag_origin[0]))
+        if self._display_context.display_height > canvas_height:
+            self.pan_y = max(0, self.drag_pan_start[1] - (event.y - self.drag_origin[1]))
         self.redraw_canvas()
 
-    def zoom_step_in(self) -> None:
-        self.zoom_var.set(zoom_in(self.zoom))
+    def _on_canvas_release(self, _event: tk.Event) -> None:
+        self.dragging = False
+        self.canvas.configure(cursor=self._cursor_for_pointer())
 
-    def zoom_step_out(self) -> None:
-        self.zoom_var.set(zoom_out(self.zoom))
+    def _on_canvas_motion(self, event: tk.Event) -> None:
+        if self.dragging:
+            self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
+        else:
+            self.canvas.configure(cursor=OPEN_HAND_CURSOR if self._point_is_over_image(event.x, event.y) else "")
 
-    def zoom_fit(self) -> None:
-        grid = self._get_active_grid()
-        if not grid:
+    def _on_canvas_leave(self, _event: tk.Event) -> None:
+        if not self.dragging:
+            self.canvas.configure(cursor="")
+
+    def _on_quick_compare_press(self, _event: tk.Event) -> None:
+        if self.view_var.get() != "processed" or self._current_output_image() is None:
             return
-        self.zoom_var.set(choose_fit_zoom(len(grid[0]), len(grid), self.canvas.winfo_width(), self.canvas.winfo_height()))
+        self.quick_compare_active = True
+        self.redraw_canvas()
 
-    def _start_pan(self, event: tk.Event) -> None:
-        self.canvas.scan_mark(event.x, event.y)
+    def _on_quick_compare_release(self, _event: tk.Event) -> None:
+        if not self.quick_compare_active:
+            return
+        self.quick_compare_active = False
+        self.redraw_canvas()
 
-    def _pan(self, event: tk.Event) -> None:
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
+    def _cursor_for_pointer(self) -> str:
+        return OPEN_HAND_CURSOR if self._point_is_over_image() else ""
+
+    def _point_is_over_image(self, x: int | None = None, y: int | None = None) -> bool:
+        if self._display_context is None:
+            return False
+        px = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx() if x is None else x
+        py = self.canvas.winfo_pointery() - self.canvas.winfo_rooty() if y is None else y
+        return (
+            self._display_context.image_left <= px <= self._display_context.image_left + self._display_context.display_width
+            and self._display_context.image_top <= py <= self._display_context.image_top + self._display_context.display_height
+        )
 
     def _on_zoom_wheel(self, event: tk.Event) -> None:
-        if event.delta > 0:
-            self.zoom_step_in()
-        else:
-            self.zoom_step_out()
+        if self.original_display_image is None:
+            return
+        self._set_zoom(zoom_in(self.zoom) if event.delta > 0 else zoom_out(self.zoom))
+
+    def _set_zoom(self, value: int) -> None:
+        self.zoom = clamp_zoom(value)
+        self.redraw_canvas()
+        self._schedule_state_persist()
+
+    def zoom_fit(self) -> None:
+        sample_image = self._get_sample_image() or self.original_display_image
+        if sample_image is None:
+            return
+        self.zoom = choose_fit_zoom(sample_image.width, sample_image.height, max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
+        self.pan_x = 0
+        self.pan_y = 0
+        self.redraw_canvas()
+        self._schedule_state_persist()
+
+    def _clamp_pan(self, display_width: int, display_height: int, canvas_width: int, canvas_height: int) -> None:
+        self.pan_x = min(max(self.pan_x, 0), max(0, display_width - canvas_width))
+        self.pan_y = min(max(self.pan_y, 0), max(0, display_height - canvas_height))
+
+    def _on_view_changed(self) -> None:
+        self.redraw_canvas()
+        self._schedule_state_persist()
+
+    def _set_view(self, value: str) -> None:
+        self.view_var.set(value)
+        self.redraw_canvas()
+
+    def _update_scale_info(self) -> None:
+        if self.original_display_image is None:
+            self.scale_info_var.set("Open an image to set the pixel size.")
+            return
+        pixel_width = max(1, int(self.pixel_width_var.get() or self.session.current.pixel_width))
+        output_width, output_height = target_size_for_pixel_width(self.original_display_image.width, self.original_display_image.height, pixel_width)
+        self.scale_info_var.set(f"Pixel size: {pixel_width} px  Output: {output_width}x{output_height}")
+
+    def _update_palette_strip(self) -> None:
+        self.palette_canvas.delete("all")
+        palette, source = self._get_display_palette()
+        if not palette:
+            self.palette_info_var.set("Palette: none")
+            self.palette_canvas.configure(height=60)
+            return
+        displayed = palette[:MAX_PALETTE_SWATCHES]
+        suffix = "" if len(displayed) == len(palette) else f" (showing first {len(displayed)})"
+        self.palette_info_var.set(f"Palette: {source} ({len(palette)} colours){suffix}")
+        columns = max(1, max(200, self.palette_canvas.winfo_width()) // (PALETTE_SWATCH_SIZE + PALETTE_SWATCH_GAP))
+        for index, colour in enumerate(displayed):
+            row = index // columns
+            col = index % columns
+            x0 = 8 + col * (PALETTE_SWATCH_SIZE + PALETTE_SWATCH_GAP)
+            y0 = 8 + row * (PALETTE_SWATCH_SIZE + PALETTE_SWATCH_GAP)
+            self.palette_canvas.create_rectangle(x0, y0, x0 + PALETTE_SWATCH_SIZE, y0 + PALETTE_SWATCH_SIZE, fill=f"#{colour:06x}", outline="#000000")
+        total_rows = ((len(displayed) - 1) // columns) + 1
+        self.palette_canvas.configure(height=min(110, 8 + total_rows * (PALETTE_SWATCH_SIZE + PALETTE_SWATCH_GAP)))
+
+    def _get_display_palette(self) -> tuple[list[int], str]:
+        if self.active_palette:
+            return self.active_palette, self.active_palette_source or "active"
+        current = self._current_output_result()
+        if current is not None:
+            return extract_unique_colors(rgb_to_labels(current.grid)), current.stats.stage
+        return ([], "none")
+
+    def _update_image_info(self) -> None:
+        filename = self.source_path.name if self.source_path is not None else "No image"
+        current = self._current_output_result()
+        resolution = f"{current.width}x{current.height}" if current is not None else "-"
+        self.image_info_var.set(f"{filename}  {resolution}  {self.zoom}%")
+
+    def _read_settings_from_controls(self, *, strict: bool) -> PreviewSettings:
+        pixel_width = max(1, int(self.pixel_width_var.get()))
+        if strict and pixel_width <= 0:
+            raise ValueError("Pixel size must be at least 1.")
+        return PreviewSettings(
+            pixel_width=pixel_width,
+            downsample_mode=RESIZE_DISPLAY_TO_VALUE.get(self.downsample_mode_var.get(), "nearest"),
+            colors=max(2, int(self.colors_var.get())),
+            input_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.input_mode_var.get(), "rgba"),
+            output_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.output_mode_var.get(), "rgba"),
+            quantizer=QUANTIZER_DISPLAY_TO_VALUE.get(self.quantizer_var.get(), "topk"),
+            dither_mode=DITHER_DISPLAY_TO_VALUE.get(self.dither_var.get(), "none"),
+        )
+
+    def _sync_controls_from_settings(self, settings: PreviewSettings) -> None:
+        self._suspend_control_events = True
+        try:
+            self.pixel_width_var.set(settings.pixel_width)
+            self.downsample_mode_var.set(RESIZE_VALUE_TO_DISPLAY.get(settings.downsample_mode, RESIZE_OPTIONS[0][0]))
+            self.colors_var.set(settings.colors)
+            self.input_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.input_mode, COLOR_MODE_OPTIONS[0][0]))
+            self.output_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.output_mode, COLOR_MODE_OPTIONS[0][0]))
+            self.quantizer_var.set(QUANTIZER_VALUE_TO_DISPLAY.get(settings.quantizer, QUANTIZER_OPTIONS[0][0]))
+            self.dither_var.set(DITHER_VALUE_TO_DISPLAY.get(settings.dither_mode, DITHER_OPTIONS[0][0]))
+        finally:
+            self._suspend_control_events = False
+
+    def _on_settings_changed(self, _event: tk.Event | None = None) -> None:
+        if self._suspend_control_events or self.image_state == "processing":
+            return
+        try:
+            previous = self.session.current
+            updated = self._read_settings_from_controls(strict=False)
+        except Exception:
+            return
+        if updated == previous:
+            self._update_scale_info()
+            return
+        self.session.apply(**vars(updated))
+        self._handle_settings_transition(previous, updated)
+
+    def _handle_settings_transition(self, previous: PreviewSettings, updated: PreviewSettings, message: str | None = None) -> None:
+        downsample_changed = (
+            previous.pixel_width != updated.pixel_width
+            or previous.downsample_mode != updated.downsample_mode
+            or previous.input_mode != updated.input_mode
+        )
+        palette_changed = (
+            previous.colors != updated.colors
+            or previous.output_mode != updated.output_mode
+            or previous.quantizer != updated.quantizer
+            or previous.dither_mode != updated.dither_mode
+        )
+        if downsample_changed:
+            self._clear_palette_undo_state()
+            self.prepared_input_cache = None
+            self.prepared_input_cache_key = None
+            message = message or "Pixel scale changed. Click Downsample to update the preview."
+        elif palette_changed:
+            self._clear_palette_undo_state()
+            message = message or "Palette settings changed. Click Apply Palette to update the preview."
+        self._mark_output_stale(message)
+        self._update_scale_info()
+        self.redraw_canvas()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
+    def _mark_output_stale(self, message: str | None = None) -> None:
+        if self.image_state == "processing":
+            return
+        if self._current_output_result() is not None:
+            self.image_state = "processed_stale"
+        elif self.original_grid is not None:
+            self.image_state = "loaded_original"
+        if message:
+            self.process_status_var.set(message)
+
+    def _build_pipeline_config(self, settings: PreviewSettings) -> PipelineConfig:
+        return PipelineConfig(
+            pixel_width=settings.pixel_width,
+            downsample_mode=settings.downsample_mode,
+            colors=settings.colors,
+            input_mode=settings.input_mode,
+            output_mode=settings.output_mode,
+            quantizer=settings.quantizer,
+            dither_mode=settings.dither_mode,
+        )
+
+    @staticmethod
+    def _build_prepare_cache_key(settings: PreviewSettings) -> tuple[object, ...]:
+        return (settings.pixel_width, settings.downsample_mode, settings.input_mode)
+
+    def _refresh_action_states(self) -> None:
+        busy = self.image_state == "processing"
+        has_image = self.original_grid is not None
+        has_output = self._current_output_result() is not None
+        has_downsample = self.prepared_input_cache is not None
+        can_save = self.image_state == "processed_current" and has_output
+        has_active_palette = bool(self.active_palette)
+        can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
+        for widget, enabled in (
+            (self.downsample_button, has_image and not busy),
+            (self.reduce_palette_button, has_downsample and not busy),
+            (self.zoom_in_button, has_image and not busy),
+            (self.zoom_out_button, has_image and not busy),
+        ):
+            widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        self.pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        self.colors_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        self._menu_items["view"].entryconfigure("Processed", state=tk.NORMAL if has_output else tk.DISABLED)
+        self._menu_items["file"].entryconfigure("Save", state=tk.NORMAL if can_save else tk.DISABLED)
+        self._menu_items["file"].entryconfigure("Save As...", state=tk.NORMAL if can_save else tk.DISABLED)
+        self._menu_items["edit"].entryconfigure("Undo", state=tk.NORMAL if can_undo and not busy else tk.DISABLED)
+        self._menu_items["edit"].entryconfigure("Downsample", state=tk.NORMAL if has_image and not busy else tk.DISABLED)
+        self._menu_items["edit"].entryconfigure("Apply Palette", state=tk.NORMAL if has_downsample and not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Input Mode", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Output Mode", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Built-in Palettes", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Load Palette...", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Save Palette...", state=tk.NORMAL if has_active_palette and not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Clear Active Palette", state=tk.NORMAL if has_active_palette and not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Resize Method", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Palette Reduction", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Dithering", state=tk.NORMAL if not busy else tk.DISABLED)
+
+    def _image_x_to_canvas(self, value: int, image_width: int) -> int:
+        if self._display_context is None:
+            return 0
+        return self._display_context.image_left + round((value / max(image_width, 1)) * self._display_context.display_width)
+
+    def _image_y_to_canvas(self, value: int, image_height: int) -> int:
+        if self._display_context is None:
+            return 0
+        return self._display_context.image_top + round((value / max(image_height, 1)) * self._display_context.display_height)
+
+    def _on_overlay_changed(self) -> None:
+        self.redraw_canvas()
+        self._schedule_state_persist()
+
+    def _schedule_state_persist(self) -> None:
+        if self._persist_after_id is not None:
+            self.root.after_cancel(self._persist_after_id)
+        self._persist_after_id = self.root.after(200, self._persist_state)
+
+    def _persist_state(self) -> None:
+        self._persist_after_id = None
+        save_app_state(
+            {
+                "settings": serialize_settings(self.session.current),
+                "active_palette_path": self.active_palette_path,
+                "active_palette_source": self.active_palette_source,
+                "last_output_path": self.last_output_path,
+                "last_successful_process_snapshot": self.last_successful_process_snapshot,
+                "zoom": self.zoom,
+                "checkerboard": self.checkerboard_var.get(),
+                "pixel_grid": self.pixel_grid_var.get(),
+                "view_mode": self.view_var.get(),
+                "recent_files": self.recent_files,
+            }
+        )
+
+    def _on_close(self) -> None:
+        if self._persist_after_id is not None:
+            self.root.after_cancel(self._persist_after_id)
+        self._persist_state()
+        self.root.destroy()
+
+    @staticmethod
+    def _normalize_recent_files(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if isinstance(item, str)]
 
 
 def main() -> int:
     root = tk.Tk()
-    app = PixelFixGui(root)
-    root.bind("<Control-z>", lambda _: app.undo())
-    root.bind("<Control-0>", lambda _: app.zoom_fit())
-    root.bind("<Control-1>", lambda _: app.zoom_var.set(100))
-    root.bind("<Control-2>", lambda _: app.zoom_var.set(200))
-    root.bind("<Control-4>", lambda _: app.zoom_var.set(400))
-    root.bind("<Control-8>", lambda _: app.zoom_var.set(800))
+    PixelFixGui(root)
     root.mainloop()
     return 0
