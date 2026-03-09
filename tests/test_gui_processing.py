@@ -7,6 +7,7 @@ from pixel_fix.gui.app import PaletteUndoState, PixelFixGui
 from pixel_fix.gui.processing import downsample_image, process_image, reduce_palette_image
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.palette.advanced import generate_structured_palette
+from pixel_fix.palette.workspace import ColorWorkspace
 from pixel_fix.pipeline import PipelineConfig
 
 
@@ -110,6 +111,11 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     gui.palette_display_image = Image.new("RGBA", (reduced.width, reduced.height), (1, 2, 3, 255))
     gui.image_state = "processed_current"
     gui.last_successful_process_snapshot = {"stage": "palette"}
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.session = SimpleNamespace(current=PreviewSettings())
     gui.quick_compare_active = True
     gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
     gui._update_palette_strip = lambda: None
@@ -117,12 +123,18 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     gui.redraw_canvas = lambda: None
     gui._schedule_state_persist = lambda: None
     gui._refresh_action_states = lambda: None
+    gui._sync_controls_from_settings = lambda _settings: None
     gui._clear_palette_undo_state = lambda: setattr(gui, "_palette_undo_state", None)
     gui._palette_undo_state = PaletteUndoState(
         palette_result=None,
         palette_display_image=None,
         image_state="processed_stale",
         last_successful_process_snapshot={"stage": "downsample"},
+        active_palette=None,
+        active_palette_source="",
+        active_palette_path=None,
+        advanced_palette_preview=None,
+        settings=PreviewSettings(),
     )
 
     assert PixelFixGui._undo_palette_application(gui) is True
@@ -420,3 +432,58 @@ def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> 
 
     assert len(rectangles) == gui.advanced_palette_preview.palette_size()
     assert palette_info.value == f"Palette: Generated ({gui.advanced_palette_preview.palette_size()} colours)"
+
+
+def test_get_display_palette_uses_adjusted_palette_preview() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.workspace = ColorWorkspace()
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.advanced_palette_preview = generate_structured_palette(
+        [],
+        key_colors=[0x336699],
+        generated_shades=2,
+    ).palette
+    gui.palette_result = None
+    gui.downsample_result = None
+    gui.session = SimpleNamespace(current=PreviewSettings(palette_brightness=20))
+
+    palette, source = PixelFixGui._get_display_palette(gui)
+
+    assert len(palette) == gui.advanced_palette_preview.palette_size()
+    assert palette != gui.advanced_palette_preview.labels()
+    assert source == "Generated (Adjusted)"
+
+
+def test_palette_adjustment_change_marks_output_stale_and_refreshes_palette() -> None:
+    messages: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
+    gui._clear_palette_undo_state = lambda: messages.append("clear")
+    gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
+    gui._update_key_color_list = lambda: messages.append("list")
+    gui._update_palette_adjustment_labels = lambda: messages.append("adjust")
+    gui._update_scale_info = lambda: messages.append("scale")
+    gui._update_palette_strip = lambda: messages.append("palette")
+    gui.redraw_canvas = lambda: messages.append("redraw")
+    gui._schedule_state_persist = lambda: messages.append("persist")
+    gui._refresh_action_states = lambda: messages.append("refresh")
+    gui._has_palette_source = lambda: True
+
+    PixelFixGui._handle_settings_transition(
+        gui,
+        PreviewSettings(),
+        PreviewSettings(palette_brightness=15),
+    )
+
+    assert messages == [
+        "clear",
+        "stale:Palette adjustments changed. Click Apply Palette to update the preview.",
+        "list",
+        "adjust",
+        "scale",
+        "palette",
+        "redraw",
+        "persist",
+        "refresh",
+    ]

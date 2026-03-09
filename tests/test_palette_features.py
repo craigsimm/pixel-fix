@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels, adjust_structured_palette
 from pixel_fix.palette.advanced import detect_key_colors_from_image, generate_structured_palette
 from pixel_fix.palette.color_modes import convert_mode, extract_unique_colors, to_indexed
 from pixel_fix.palette.dither import apply_dither
@@ -146,6 +147,35 @@ def test_generate_structured_palette_caps_key_colours_at_twenty_four() -> None:
     )
     assert len(computation.palette.key_colors) == 24
     assert len(computation.palette.ramps) == 24
+
+
+def test_adjust_palette_labels_changes_palette_in_oklab_space() -> None:
+    labels = [0x336699, 0x88AACC, 0xCC8844]
+    adjusted = adjust_palette_labels(
+        labels,
+        PaletteAdjustments(brightness=15, contrast=130, hue=20, saturation=140),
+    )
+    assert len(adjusted) == len(labels)
+    assert adjusted != labels
+    assert all(isinstance(value, int) and 0 <= value <= 0xFFFFFF for value in adjusted)
+
+
+def test_adjust_structured_palette_preserves_ramp_structure() -> None:
+    palette = generate_structured_palette(
+        [],
+        key_colors=[0x336699, 0xCC8844],
+        generated_shades=2,
+    ).palette
+    adjusted = adjust_structured_palette(
+        palette,
+        PaletteAdjustments(brightness=10, contrast=120, saturation=130),
+    )
+    assert len(adjusted.ramps) == len(palette.ramps)
+    assert [len(ramp.colors) for ramp in adjusted.ramps] == [len(ramp.colors) for ramp in palette.ramps]
+    assert adjusted.labels() != palette.labels()
+    for ramp in adjusted.ramps:
+        seed_color = next(color for color in ramp.colors if color.is_seed)
+        assert ramp.seed_label == seed_color.label
 
 
 def test_detect_key_colors_ignores_transparent_pixels() -> None:

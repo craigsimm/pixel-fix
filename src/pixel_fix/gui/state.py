@@ -11,6 +11,10 @@ class PreviewSettings:
     generated_shades: int = 4
     auto_detect_count: int = 12
     contrast_bias: float = 1.0
+    palette_brightness: int = 0
+    palette_contrast: int = 100
+    palette_hue: int = 0
+    palette_saturation: int = 100
     palette_dither_mode: str = "none"
     input_mode: str = "rgba"
     output_mode: str = "rgba"
