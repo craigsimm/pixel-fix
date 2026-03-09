@@ -3,17 +3,18 @@ from __future__ import annotations
 import sys
 import threading
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from pixel_fix.palette.advanced import detect_key_colors_from_image, generate_structured_palette
+from pixel_fix.palette.adjust import PaletteAdjustments, adjust_structured_palette
+from pixel_fix.palette.advanced import detect_key_colors_from_image, generate_structured_palette, structured_palette_from_override
 from pixel_fix.palette.color_modes import extract_unique_colors
 from pixel_fix.palette.io import load_palette, save_palette
 from pixel_fix.palette.catalog import PaletteCatalogEntry, discover_palette_catalog
-from pixel_fix.palette.model import StructuredPalette
+from pixel_fix.palette.model import StructuredPalette, clone_structured_palette
 from pixel_fix.palette.quantize import generate_palette as generate_override_palette
 from pixel_fix.palette.workspace import ColorWorkspace
 from pixel_fix.pipeline import PipelineConfig
@@ -105,6 +106,11 @@ class PaletteUndoState:
     palette_display_image: Image.Image | None
     image_state: str
     last_successful_process_snapshot: dict[str, object] | None
+    active_palette: list[int] | None
+    active_palette_source: str
+    active_palette_path: str | None
+    advanced_palette_preview: StructuredPalette | None
+    settings: PreviewSettings
 
 
 class PixelFixGui:
@@ -163,6 +169,10 @@ class PixelFixGui:
         self.generated_shades_var = tk.StringVar()
         self.auto_detect_count_var = tk.StringVar()
         self.contrast_bias_var = tk.DoubleVar()
+        self.palette_brightness_var = tk.IntVar()
+        self.palette_contrast_var = tk.IntVar()
+        self.palette_hue_var = tk.IntVar()
+        self.palette_saturation_var = tk.IntVar()
         self.palette_dither_var = tk.StringVar()
         self.input_mode_var = tk.StringVar()
         self.output_mode_var = tk.StringVar()
@@ -174,6 +184,10 @@ class PixelFixGui:
         self.key_colors_label_var = tk.StringVar(value="Key colours (0)")
         self.palette_info_var = tk.StringVar(value="Palette: none")
         self.image_info_var = tk.StringVar(value="No image  -  100%")
+        self.palette_brightness_value_var = tk.StringVar(value="0")
+        self.palette_contrast_value_var = tk.StringVar(value="100%")
+        self.palette_hue_value_var = tk.StringVar(value="0 deg")
+        self.palette_saturation_value_var = tk.StringVar(value="100%")
 
         self._menu_items: dict[str, tk.Menu] = {}
         self._build_menu_bar()
@@ -370,6 +384,41 @@ class PixelFixGui:
         self.reduce_palette_button = tk.Button(palette_section, text="Apply Palette", command=self.reduce_palette_current_image, relief=tk.FLAT, padx=14, pady=4)
         self.reduce_palette_button.pack(anchor=tk.W, pady=(8, 0))
 
+        adjust_section = self._create_section(sidebar, "4. Adjust palette")
+        self.palette_adjustment_controls: list[tk.Scale] = []
+        self.palette_brightness_scale = self._create_palette_adjustment_row(
+            adjust_section,
+            label="Brightness",
+            variable=self.palette_brightness_var,
+            value_var=self.palette_brightness_value_var,
+            from_=-100,
+            to=100,
+        )
+        self.palette_contrast_scale = self._create_palette_adjustment_row(
+            adjust_section,
+            label="Contrast",
+            variable=self.palette_contrast_var,
+            value_var=self.palette_contrast_value_var,
+            from_=0,
+            to=200,
+        )
+        self.palette_hue_scale = self._create_palette_adjustment_row(
+            adjust_section,
+            label="Hue",
+            variable=self.palette_hue_var,
+            value_var=self.palette_hue_value_var,
+            from_=-180,
+            to=180,
+        )
+        self.palette_saturation_scale = self._create_palette_adjustment_row(
+            adjust_section,
+            label="Saturation",
+            variable=self.palette_saturation_var,
+            value_var=self.palette_saturation_value_var,
+            from_=0,
+            to=200,
+        )
+
         workspace = ttk.Frame(body)
         workspace.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
@@ -415,12 +464,43 @@ class PixelFixGui:
 
         self._configure_primary_button(self.downsample_button)
         self._configure_primary_button(self.reduce_palette_button)
+        self._update_palette_adjustment_labels()
         self._bind_shortcuts()
 
     def _create_section(self, parent: ttk.Frame, title: str) -> ttk.LabelFrame:
         frame = ttk.LabelFrame(parent, text=title)
         frame.pack(fill=tk.X, pady=(0, 10))
         return frame
+
+    def _create_palette_adjustment_row(
+        self,
+        parent: ttk.LabelFrame,
+        *,
+        label: str,
+        variable: tk.IntVar,
+        value_var: tk.StringVar,
+        from_: int,
+        to: int,
+    ) -> tk.Scale:
+        row = ttk.Frame(parent)
+        row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(row, text=label).pack(side=tk.LEFT)
+        ttk.Label(row, textvariable=value_var).pack(side=tk.RIGHT)
+        scale = tk.Scale(
+            parent,
+            from_=from_,
+            to=to,
+            orient=tk.HORIZONTAL,
+            resolution=1,
+            showvalue=False,
+            variable=variable,
+            command=self._on_palette_adjustment_scale,
+            highlightthickness=0,
+            relief=tk.FLAT,
+        )
+        scale.pack(fill=tk.X)
+        self.palette_adjustment_controls.append(scale)
+        return scale
 
     def _configure_primary_button(self, button: tk.Button) -> None:
         button._pixel_fix_hovered = False  # type: ignore[attr-defined]
@@ -452,6 +532,82 @@ class PixelFixGui:
             bg = PRIMARY_BUTTON_INACTIVE_BG
             fg = PRIMARY_BUTTON_INACTIVE_FG
         button.configure(bg=bg, fg=fg)
+
+    def _on_palette_adjustment_scale(self, _value: str | None = None) -> None:
+        self._update_palette_adjustment_labels()
+        self._on_settings_changed()
+
+    def _update_palette_adjustment_labels(self) -> None:
+        self.palette_brightness_value_var.set(str(int(self.palette_brightness_var.get())))
+        self.palette_contrast_value_var.set(f"{int(self.palette_contrast_var.get())}%")
+        self.palette_hue_value_var.set(f"{int(self.palette_hue_var.get())} deg")
+        self.palette_saturation_value_var.set(f"{int(self.palette_saturation_var.get())}%")
+
+    def _palette_adjustments(self, settings: PreviewSettings | None = None) -> PaletteAdjustments:
+        session = getattr(self, "session", None)
+        current = settings or getattr(session, "current", PreviewSettings())
+        return PaletteAdjustments(
+            brightness=current.palette_brightness,
+            contrast=current.palette_contrast,
+            hue=current.palette_hue,
+            saturation=current.palette_saturation,
+        )
+
+    def _current_base_structured_palette(self) -> StructuredPalette | None:
+        workspace = getattr(self, "workspace", None) or ColorWorkspace()
+        if self.active_palette:
+            return structured_palette_from_override(
+                self.active_palette,
+                workspace=workspace,
+                source_label=self.active_palette_source or "Active",
+            )
+        if self.advanced_palette_preview is not None:
+            return clone_structured_palette(self.advanced_palette_preview)
+        current = self._current_output_result()
+        if current is not None and current.structured_palette is not None:
+            return clone_structured_palette(current.structured_palette)
+        if current is not None:
+            base_palette = extract_unique_colors(rgb_to_labels(current.grid))
+            if base_palette:
+                return structured_palette_from_override(
+                    base_palette,
+                    workspace=workspace,
+                    source_label=current.stats.stage.title(),
+                )
+        return None
+
+    def _current_adjusted_structured_palette(self, settings: PreviewSettings | None = None) -> StructuredPalette | None:
+        base_palette = self._current_base_structured_palette()
+        if base_palette is None or base_palette.palette_size() == 0:
+            return None
+        return adjust_structured_palette(
+            base_palette,
+            self._palette_adjustments(settings),
+            workspace=getattr(self, "workspace", None) or ColorWorkspace(),
+        )
+
+    def _has_palette_source(self) -> bool:
+        adjusted = self._current_adjusted_structured_palette()
+        return adjusted is not None and adjusted.palette_size() > 0
+
+    def _adjusted_palette_source_label(self, palette: StructuredPalette, settings: PreviewSettings | None = None) -> str:
+        source = palette.source_label or "Palette"
+        if self._palette_adjustments(settings).is_neutral():
+            return source
+        return f"{source} (Adjusted)"
+
+    def _reset_palette_adjustments_to_neutral(self) -> None:
+        if not hasattr(self, "session"):
+            return
+        neutral = replace(
+            self.session.current,
+            palette_brightness=0,
+            palette_contrast=100,
+            palette_hue=0,
+            palette_saturation=100,
+        )
+        self.session.current = neutral
+        self._sync_controls_from_settings(neutral)
 
     def _bind_shortcuts(self) -> None:
         self.root.bind("<Control-o>", lambda _event: self.open_image())
@@ -792,14 +948,7 @@ class PixelFixGui:
         self._on_settings_changed(_event)
 
     def _displayed_structured_palette(self) -> StructuredPalette | None:
-        if self._palette_is_override_mode():
-            return None
-        if self.advanced_palette_preview is not None:
-            return self.advanced_palette_preview
-        current = self._current_output_result()
-        if current is not None:
-            return current.structured_palette
-        return None
+        return self._current_adjusted_structured_palette()
 
     def _sample_label_from_preview(self, canvas_x: int, canvas_y: int) -> int | None:
         if self._display_context is None or self._get_effective_view() != "original":
@@ -952,8 +1101,9 @@ class PixelFixGui:
         if self.prepared_input_cache is None or self.source_path is None:
             self.process_status_var.set("Downsample the image before applying a palette.")
             return
-        if self.active_palette is None and self.advanced_palette_preview is None:
-            self.process_status_var.set("Pick key colours and click Generate Ramps before applying the palette.")
+        adjusted_palette = self._current_adjusted_structured_palette()
+        if adjusted_palette is None or adjusted_palette.palette_size() == 0:
+            self.process_status_var.set("Create, load, or adjust a palette before applying it.")
             return
         try:
             settings = self._read_settings_from_controls(strict=True)
@@ -972,6 +1122,16 @@ class PixelFixGui:
         self.process_status_var.set("Applying palette...")
         self._refresh_action_states()
         config = self._build_pipeline_config(settings)
+        apply_override_palette: list[int] | None = None
+        apply_override_source: str | None = None
+        apply_override_path: str | None = None
+        apply_structured_palette: StructuredPalette | None = None
+        if self._palette_is_override_mode() or adjusted_palette.source_mode == "override":
+            apply_override_palette = adjusted_palette.labels()
+            apply_override_source = adjusted_palette.source_label or self.active_palette_source or "Override"
+            apply_override_path = self.active_palette_path if self.active_palette is not None else None
+        else:
+            apply_structured_palette = adjusted_palette
 
         def progress_callback(_percent: int, message: str) -> None:
             self.root.after(0, lambda: self.process_status_var.set(message))
@@ -981,11 +1141,22 @@ class PixelFixGui:
                 result = reduce_palette_image(
                     self.prepared_input_cache,
                     config,
-                    palette_override=self.active_palette,
-                    structured_palette=None if self.active_palette is not None else self.advanced_palette_preview,
+                    palette_override=apply_override_palette,
+                    structured_palette=apply_structured_palette,
                     progress_callback=progress_callback,
                 )
-                self.root.after(0, lambda: self._handle_palette_success(result, snapshot, changes, source_size))
+                self.root.after(
+                    0,
+                    lambda: self._handle_palette_success(
+                        result,
+                        snapshot,
+                        changes,
+                        source_size,
+                        applied_override_palette=apply_override_palette,
+                        applied_override_source=apply_override_source,
+                        applied_override_path=apply_override_path,
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001
                 self.root.after(0, lambda: self._handle_stage_failure(str(exc), changes, source_size))
 
@@ -1024,6 +1195,11 @@ class PixelFixGui:
             palette_display_image=self.palette_display_image.copy() if self.palette_display_image is not None else None,
             image_state=self.image_state,
             last_successful_process_snapshot=dict(self.last_successful_process_snapshot) if isinstance(self.last_successful_process_snapshot, dict) else self.last_successful_process_snapshot,
+            active_palette=list(self.active_palette) if self.active_palette is not None else None,
+            active_palette_source=self.active_palette_source,
+            active_palette_path=self.active_palette_path,
+            advanced_palette_preview=clone_structured_palette(self.advanced_palette_preview),
+            settings=self.session.current,
         )
 
     def _clear_palette_undo_state(self) -> None:
@@ -1039,6 +1215,10 @@ class PixelFixGui:
         self.last_successful_process_snapshot = (
             dict(state.last_successful_process_snapshot) if isinstance(state.last_successful_process_snapshot, dict) else state.last_successful_process_snapshot
         )
+        self._set_active_palette(state.active_palette, state.active_palette_source, state.active_palette_path)
+        self.advanced_palette_preview = clone_structured_palette(state.advanced_palette_preview)
+        self.session.current = state.settings
+        self._sync_controls_from_settings(state.settings)
         self.quick_compare_active = False
         self._clear_palette_undo_state()
         self.process_status_var.set("Reverted the last palette application.")
@@ -1095,11 +1275,19 @@ class PixelFixGui:
         snapshot: dict[str, object],
         changes: list[str],
         source_size: tuple[int, int],
+        *,
+        applied_override_palette: list[int] | None = None,
+        applied_override_source: str | None = None,
+        applied_override_path: str | None = None,
     ) -> None:
         self.palette_result = result
         self.palette_display_image = grid_to_pil_image(result.grid).convert("RGBA")
-        if result.structured_palette is not None and result.structured_palette.source_mode == "advanced":
+        if applied_override_palette is not None:
+            self._set_active_palette(applied_override_palette, applied_override_source or "Override", applied_override_path)
+            self.advanced_palette_preview = None
+        elif result.structured_palette is not None and result.structured_palette.source_mode == "advanced":
             self.advanced_palette_preview = result.structured_palette
+        self._reset_palette_adjustments_to_neutral()
         self.image_state = "processed_current"
         self.last_successful_process_snapshot = snapshot
         self._set_view("processed")
@@ -1394,15 +1582,9 @@ class PixelFixGui:
         self.palette_canvas.configure(height=min(110, 8 + total_rows * (PALETTE_SWATCH_SIZE + PALETTE_SWATCH_GAP)))
 
     def _get_display_palette(self) -> tuple[list[int], str]:
-        if self.active_palette:
-            return self.active_palette, self.active_palette_source or "active"
-        if self.advanced_palette_preview is not None:
-            return self.advanced_palette_preview.labels(), self.advanced_palette_preview.source_label or "generated"
-        current = self._current_output_result()
-        if current is not None and current.structured_palette is not None:
-            return current.structured_palette.labels(), current.structured_palette.source_label or current.stats.stage
-        if current is not None:
-            return extract_unique_colors(rgb_to_labels(current.grid)), current.stats.stage
+        adjusted_palette = self._current_adjusted_structured_palette()
+        if adjusted_palette is not None:
+            return adjusted_palette.labels(), self._adjusted_palette_source_label(adjusted_palette)
         return ([], "none")
 
     def _update_image_info(self) -> None:
@@ -1422,6 +1604,10 @@ class PixelFixGui:
             generated_shades=max(2, min(10, int(self.generated_shades_var.get() or 4))),
             auto_detect_count=max(1, min(MAX_KEY_COLORS, int(self.auto_detect_count_var.get() or MAX_KEY_COLORS))),
             contrast_bias=max(0.1, min(1.0, float(self.contrast_bias_var.get() or 1.0))),
+            palette_brightness=max(-100, min(100, int(self.palette_brightness_var.get() or 0))),
+            palette_contrast=max(0, min(200, int(self.palette_contrast_var.get() or 100))),
+            palette_hue=max(-180, min(180, int(self.palette_hue_var.get() or 0))),
+            palette_saturation=max(0, min(200, int(self.palette_saturation_var.get() or 100))),
             palette_dither_mode=DITHER_DISPLAY_TO_VALUE.get(self.palette_dither_var.get(), "none"),
             input_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.input_mode_var.get(), "rgba"),
             output_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.output_mode_var.get(), "rgba"),
@@ -1438,6 +1624,10 @@ class PixelFixGui:
             self.generated_shades_var.set(str(settings.generated_shades))
             self.auto_detect_count_var.set(str(settings.auto_detect_count))
             self.contrast_bias_var.set(settings.contrast_bias)
+            self.palette_brightness_var.set(settings.palette_brightness)
+            self.palette_contrast_var.set(settings.palette_contrast)
+            self.palette_hue_var.set(settings.palette_hue)
+            self.palette_saturation_var.set(settings.palette_saturation)
             self.palette_dither_var.set(DITHER_VALUE_TO_DISPLAY.get(settings.palette_dither_mode, DITHER_OPTIONS[0][0]))
             self.input_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.input_mode, COLOR_MODE_OPTIONS[0][0]))
             self.output_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.output_mode, COLOR_MODE_OPTIONS[0][0]))
@@ -1445,6 +1635,7 @@ class PixelFixGui:
             self.dither_var.set(DITHER_VALUE_TO_DISPLAY.get(settings.dither_mode, DITHER_OPTIONS[0][0]))
         finally:
             self._suspend_control_events = False
+        self._update_palette_adjustment_labels()
 
     def _on_settings_changed(self, _event: tk.Event | None = None) -> None:
         if self._suspend_control_events or self.image_state == "processing":
@@ -1475,6 +1666,12 @@ class PixelFixGui:
             previous.palette_reduction_colors != updated.palette_reduction_colors
             or previous.quantizer != updated.quantizer
         )
+        palette_adjustment_changed = (
+            previous.palette_brightness != updated.palette_brightness
+            or previous.palette_contrast != updated.palette_contrast
+            or previous.palette_hue != updated.palette_hue
+            or previous.palette_saturation != updated.palette_saturation
+        )
         palette_apply_changed = (
             previous.palette_dither_mode != updated.palette_dither_mode
             or previous.output_mode != updated.output_mode
@@ -1499,11 +1696,24 @@ class PixelFixGui:
             self._schedule_state_persist()
             self._refresh_action_states()
             return
+        elif palette_adjustment_changed:
+            self._clear_palette_undo_state()
+            if self._has_palette_source():
+                message = message or "Palette adjustments changed. Click Apply Palette to update the preview."
+            else:
+                self.process_status_var.set("Palette adjustment settings updated.")
+                self._update_palette_adjustment_labels()
+                self._update_palette_strip()
+                self.redraw_canvas()
+                self._schedule_state_persist()
+                self._refresh_action_states()
+                return
         elif palette_apply_changed:
             self._clear_palette_undo_state()
             message = message or "Palette settings changed. Click Apply Palette to update the preview."
         self._mark_output_stale(message)
         self._update_key_color_list()
+        self._update_palette_adjustment_labels()
         self._update_scale_info()
         self._update_palette_strip()
         self.redraw_canvas()
@@ -1545,7 +1755,7 @@ class PixelFixGui:
         has_image = self.original_grid is not None
         has_output = self._current_output_result() is not None
         has_downsample = self.prepared_input_cache is not None
-        has_generated_palette = self.advanced_palette_preview is not None
+        has_palette_source = self._has_palette_source()
         can_save = self.image_state == "processed_current" and has_output
         has_active_palette = bool(self.active_palette)
         can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
@@ -1554,7 +1764,7 @@ class PixelFixGui:
             (self.downsample_button, has_image and not busy),
             (self.generate_ramps_button, advanced_editable and bool(self.key_colors)),
             (self.generate_override_palette_button, has_downsample and not busy),
-            (self.reduce_palette_button, has_downsample and not busy and (has_active_palette or has_generated_palette)),
+            (self.reduce_palette_button, has_downsample and not busy and has_palette_source),
             (self.zoom_in_button, has_image and not busy),
             (self.zoom_out_button, has_image and not busy),
             (self.pick_seed_button, advanced_editable),
@@ -1567,6 +1777,9 @@ class PixelFixGui:
         self.pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
         self.palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
         self.key_color_listbox.configure(state=tk.NORMAL if advanced_editable else tk.DISABLED)
+        adjustment_state = tk.NORMAL if has_palette_source and not busy else tk.DISABLED
+        for control in getattr(self, "palette_adjustment_controls", []):
+            control.configure(state=adjustment_state)
         self._menu_items["view"].entryconfigure("Processed", state=tk.NORMAL if has_output else tk.DISABLED)
         self._menu_items["file"].entryconfigure("Save", state=tk.NORMAL if can_save else tk.DISABLED)
         self._menu_items["file"].entryconfigure("Save As...", state=tk.NORMAL if can_save else tk.DISABLED)
@@ -1574,7 +1787,7 @@ class PixelFixGui:
         self._menu_items["edit"].entryconfigure("Downsample", state=tk.NORMAL if has_image and not busy else tk.DISABLED)
         self._menu_items["edit"].entryconfigure(
             "Apply Palette",
-            state=tk.NORMAL if has_downsample and not busy and (has_active_palette or has_generated_palette) else tk.DISABLED,
+            state=tk.NORMAL if has_downsample and not busy and has_palette_source else tk.DISABLED,
         )
         self._menu_items["palette"].entryconfigure("Input Mode", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Output Mode", state=tk.NORMAL if not busy else tk.DISABLED)

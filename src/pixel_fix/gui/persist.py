@@ -19,6 +19,10 @@ SETTING_LABELS = {
     "generated_shades": "Ramp steps",
     "auto_detect_count": "Auto-detect count",
     "contrast_bias": "Ramp contrast",
+    "palette_brightness": "Palette brightness",
+    "palette_contrast": "Palette contrast",
+    "palette_hue": "Palette hue",
+    "palette_saturation": "Palette saturation",
     "palette_dither_mode": "Dithering method",
     "input_mode": "Input mode",
     "output_mode": "Output mode",
@@ -59,6 +63,10 @@ def serialize_settings(settings: PreviewSettings) -> dict[str, Any]:
         "generated_shades": settings.generated_shades,
         "auto_detect_count": settings.auto_detect_count,
         "contrast_bias": settings.contrast_bias,
+        "palette_brightness": settings.palette_brightness,
+        "palette_contrast": settings.palette_contrast,
+        "palette_hue": settings.palette_hue,
+        "palette_saturation": settings.palette_saturation,
         "palette_dither_mode": settings.palette_dither_mode,
         "input_mode": settings.input_mode,
         "output_mode": settings.output_mode,
@@ -77,6 +85,10 @@ def deserialize_settings(data: dict[str, Any] | None) -> PreviewSettings:
         generated_shades=_coerce_generated_shades(data.get("generated_shades", data.get("ramp_length", 4))),
         auto_detect_count=_coerce_auto_detect_count(data.get("auto_detect_count", 12)),
         contrast_bias=_coerce_ramp_contrast(data.get("contrast_bias", 1.0)),
+        palette_brightness=_coerce_palette_brightness(data.get("palette_brightness", 0)),
+        palette_contrast=_coerce_palette_contrast(data.get("palette_contrast", 100)),
+        palette_hue=_coerce_palette_hue(data.get("palette_hue", 0)),
+        palette_saturation=_coerce_palette_saturation(data.get("palette_saturation", 100)),
         palette_dither_mode=str(data.get("palette_dither_mode", data.get("dither_mode", "none"))),
         input_mode=str(data.get("input_mode", "rgba")),
         output_mode=str(data.get("output_mode", "rgba")),
@@ -186,6 +198,22 @@ def _coerce_ramp_contrast(value: Any) -> float:
     parsed = _as_float(value, 1.0)
     allowed = tuple(index / 10.0 for index in range(1, 11))
     return min(allowed, key=lambda candidate: abs(candidate - parsed))
+
+
+def _coerce_palette_brightness(value: Any) -> int:
+    return max(-100, min(100, _as_int(value, 0)))
+
+
+def _coerce_palette_contrast(value: Any) -> int:
+    return max(0, min(200, _as_int(value, 100)))
+
+
+def _coerce_palette_hue(value: Any) -> int:
+    return max(-180, min(180, _as_int(value, 0)))
+
+
+def _coerce_palette_saturation(value: Any) -> int:
+    return max(0, min(200, _as_int(value, 100)))
 
 
 def _coerce_palette_reduction_method(value: Any) -> str:

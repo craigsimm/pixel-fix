@@ -20,6 +20,10 @@ def test_settings_roundtrip() -> None:
         generated_shades=6,
         auto_detect_count=9,
         contrast_bias=0.7,
+        palette_brightness=15,
+        palette_contrast=130,
+        palette_hue=-20,
+        palette_saturation=140,
         palette_dither_mode="blue-noise",
         input_mode="rgba",
         output_mode="indexed",
@@ -36,6 +40,10 @@ def test_default_settings_use_manual_pixel_size() -> None:
     assert PreviewSettings().palette_reduction_colors == 16
     assert PreviewSettings().auto_detect_count == 12
     assert PreviewSettings().quantizer == "median-cut"
+    assert PreviewSettings().palette_brightness == 0
+    assert PreviewSettings().palette_contrast == 100
+    assert PreviewSettings().palette_hue == 0
+    assert PreviewSettings().palette_saturation == 100
 
 
 def test_diff_snapshots_uses_friendly_messages() -> None:
@@ -48,6 +56,10 @@ def test_diff_snapshots_uses_friendly_messages() -> None:
             generated_shades=6,
             auto_detect_count=9,
             contrast_bias=0.7,
+            palette_brightness=15,
+            palette_contrast=130,
+            palette_hue=-20,
+            palette_saturation=140,
             palette_dither_mode="blue-noise",
             quantizer="kmeans",
         ),
@@ -62,6 +74,10 @@ def test_diff_snapshots_uses_friendly_messages() -> None:
     assert "Ramp steps: 4 > 6" in changes
     assert "Auto-detect count: 12 > 9" in changes
     assert "Ramp contrast: 1.0 > 0.7" in changes
+    assert "Palette brightness: 0 > 15" in changes
+    assert "Palette contrast: 100 > 130" in changes
+    assert "Palette hue: 0 > -20" in changes
+    assert "Palette saturation: 100 > 140" in changes
     assert "Palette reduction method: median-cut > kmeans" in changes
     assert "Dithering method: none > blue-noise" in changes
     assert "Palette size: 0 > 2" in changes
@@ -77,6 +93,10 @@ def test_deserialize_settings_clamps_advanced_palette_controls() -> None:
             "generated_shades": 9,
             "auto_detect_count": 99,
             "contrast_bias": -2,
+            "palette_brightness": -999,
+            "palette_contrast": 999,
+            "palette_hue": -999,
+            "palette_saturation": 999,
             "quantizer": "topk",
             "palette_dither_mode": "ordered",
         }
@@ -86,6 +106,10 @@ def test_deserialize_settings_clamps_advanced_palette_controls() -> None:
     assert restored.generated_shades == 8
     assert restored.auto_detect_count == 24
     assert restored.contrast_bias == 0.1
+    assert restored.palette_brightness == -100
+    assert restored.palette_contrast == 200
+    assert restored.palette_hue == -180
+    assert restored.palette_saturation == 200
     assert restored.quantizer == "median-cut"
     assert restored.palette_dither_mode == "ordered"
 
