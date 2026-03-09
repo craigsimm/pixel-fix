@@ -5,8 +5,11 @@ from pathlib import Path
 
 
 def save_palette(path: Path, palette: list[int]) -> None:
-    data = {"palette": [f"#{(value >> 16) & 0xFF:02x}{(value >> 8) & 0xFF:02x}{value & 0xFF:02x}" for value in palette]}
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        data = {"palette": [f"#{(value >> 16) & 0xFF:02x}{(value >> 8) & 0xFF:02x}{value & 0xFF:02x}" for value in palette]}
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return
+    path.write_text(_serialize_gpl_palette(path, palette), encoding="utf-8")
 
 
 def load_palette(path: Path) -> list[int]:
@@ -57,3 +60,18 @@ def _load_gpl_palette(path: Path) -> list[int]:
     if not palette:
         raise ValueError("Palette file is empty")
     return palette
+
+
+def _serialize_gpl_palette(path: Path, palette: list[int]) -> str:
+    lines = [
+        "GIMP Palette",
+        f"Name: {path.stem}",
+        "Columns: 8",
+        "#",
+    ]
+    for index, value in enumerate(palette, start=1):
+        red = (value >> 16) & 0xFF
+        green = (value >> 8) & 0xFF
+        blue = value & 0xFF
+        lines.append(f"{red:3d} {green:3d} {blue:3d}\tColor {index}")
+    return "\n".join(lines) + "\n"

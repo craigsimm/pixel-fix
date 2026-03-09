@@ -44,6 +44,9 @@ class ProcessStats:
     histogram_size: int = 0
     palette_generation_seconds: float = 0.0
     mapping_seconds: float = 0.0
+    anti_alias_pixels_fixed: int = 0
+    orphan_pixels_replaced: int = 0
+    gap_pixels_filled: int = 0
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class ProcessResult:
     height: int
     stats: ProcessStats
     prepared_input: PipelinePreparedResult
+    display_palette_labels: tuple[int, ...] = ()
     structured_palette: StructuredPalette | None = None
 
 
@@ -82,6 +86,7 @@ def load_png_rgba_image(path: str) -> Image.Image:
 def downsample_image(
     grid: RGBGrid,
     config: PipelineConfig,
+    source_rgba: Image.Image | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> ProcessResult:
     started = perf_counter()
@@ -90,7 +95,9 @@ def downsample_image(
         rgb_to_labels(grid),
         progress_callback=progress_callback,
         grid_message=f"Downsampling with {display_resize_method(config.downsample_mode)}...",
+        source_rgba=source_rgba,
     )
+    display_palette_labels = tuple(extract_unique_colors(prepared_input.reduced_labels))
     rgb_grid = labels_to_rgb(prepared_input.reduced_labels)
     height = len(rgb_grid)
     width = len(rgb_grid[0]) if height else 0
@@ -105,10 +112,14 @@ def downsample_image(
             input_size=prepared_input.input_size,
             output_size=(width, height),
             initial_color_count=prepared_input.initial_color_count,
-            color_count=len(extract_unique_colors(prepared_input.reduced_labels)),
+            color_count=len(display_palette_labels),
             elapsed_seconds=perf_counter() - started,
+            anti_alias_pixels_fixed=prepared_input.anti_alias_pixels_fixed,
+            orphan_pixels_replaced=prepared_input.orphan_pixels_replaced,
+            gap_pixels_filled=prepared_input.gap_pixels_filled,
         ),
         prepared_input=prepared_input,
+        display_palette_labels=display_palette_labels,
     )
 
 
@@ -127,6 +138,8 @@ def reduce_palette_image(
         structured_palette=structured_palette,
         progress_callback=progress_callback,
     )
+    output_palette_labels = tuple(extract_unique_colors(result.labels))
+    display_palette_labels = tuple(result.structured_palette.labels()) if result.structured_palette is not None else output_palette_labels
     rgb_grid = labels_to_rgb(result.labels)
     height = len(rgb_grid)
     width = len(rgb_grid[0]) if height else 0
@@ -141,7 +154,7 @@ def reduce_palette_image(
             input_size=prepared_input.input_size,
             output_size=(width, height),
             initial_color_count=prepared_input.initial_color_count,
-            color_count=len(extract_unique_colors(result.labels)),
+            color_count=len(output_palette_labels),
             elapsed_seconds=perf_counter() - started,
             seed_count=result.seed_count,
             ramp_count=result.ramp_count,
@@ -150,8 +163,12 @@ def reduce_palette_image(
             histogram_size=result.histogram_size,
             palette_generation_seconds=result.palette_generation_seconds,
             mapping_seconds=result.mapping_seconds,
+            anti_alias_pixels_fixed=result.anti_alias_pixels_fixed,
+            orphan_pixels_replaced=result.orphan_pixels_replaced,
+            gap_pixels_filled=result.gap_pixels_filled,
         ),
         prepared_input=prepared_input,
+        display_palette_labels=display_palette_labels,
         structured_palette=result.structured_palette,
     )
 
@@ -163,10 +180,11 @@ def process_image(
     structured_palette: StructuredPalette | None = None,
     progress_callback: PipelineProgressCallback | None = None,
     prepared_input: PipelinePreparedResult | None = None,
+    source_rgba: Image.Image | None = None,
 ) -> ProcessResult:
     prepared = prepared_input
     if prepared is None:
-        downsampled = downsample_image(grid, config, progress_callback=progress_callback)
+        downsampled = downsample_image(grid, config, source_rgba=source_rgba, progress_callback=progress_callback)
         prepared = downsampled.prepared_input
     elif progress_callback is not None:
         progress_callback(10, "Preparing input")

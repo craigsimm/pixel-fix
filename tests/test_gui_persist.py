@@ -16,6 +16,11 @@ def test_settings_roundtrip() -> None:
     settings = PreviewSettings(
         pixel_width=3,
         downsample_mode="rotsprite",
+        orphan_cleanup_enabled=True,
+        orphan_min_similar_neighbors=2,
+        orphan_fill_gaps=False,
+        anti_alias_removal_enabled=True,
+        anti_alias_alpha_threshold=200,
         palette_reduction_colors=24,
         generated_shades=6,
         auto_detect_count=9,
@@ -37,6 +42,11 @@ def test_settings_roundtrip() -> None:
 def test_default_settings_use_manual_pixel_size() -> None:
     assert PreviewSettings().pixel_width == 2
     assert PreviewSettings().downsample_mode == "nearest"
+    assert PreviewSettings().orphan_cleanup_enabled is False
+    assert PreviewSettings().orphan_min_similar_neighbors == 1
+    assert PreviewSettings().orphan_fill_gaps is True
+    assert PreviewSettings().anti_alias_removal_enabled is False
+    assert PreviewSettings().anti_alias_alpha_threshold == 224
     assert PreviewSettings().palette_reduction_colors == 16
     assert PreviewSettings().auto_detect_count == 12
     assert PreviewSettings().quantizer == "median-cut"
@@ -52,6 +62,11 @@ def test_diff_snapshots_uses_friendly_messages() -> None:
         PreviewSettings(
             pixel_width=4,
             downsample_mode="bilinear",
+            orphan_cleanup_enabled=True,
+            orphan_min_similar_neighbors=2,
+            orphan_fill_gaps=False,
+            anti_alias_removal_enabled=True,
+            anti_alias_alpha_threshold=200,
             palette_reduction_colors=24,
             generated_shades=6,
             auto_detect_count=9,
@@ -70,6 +85,11 @@ def test_diff_snapshots_uses_friendly_messages() -> None:
     changes = diff_snapshots(previous, current)
     assert "Pixel size: 2 > 4" in changes
     assert "Resize method: nearest > bilinear" in changes
+    assert "Stray pixel cleanup: off > on" in changes
+    assert "Stray pixel neighbour threshold: 1 > 2" in changes
+    assert "Fill 1px gaps: on > off" in changes
+    assert "Anti-aliased edge cleanup: off > on" in changes
+    assert "Edge alpha cutoff: 224 > 200" in changes
     assert "Palette reduction colours: 16 > 24" in changes
     assert "Ramp steps: 4 > 6" in changes
     assert "Auto-detect count: 12 > 9" in changes
@@ -89,6 +109,8 @@ def test_deserialize_settings_clamps_advanced_palette_controls() -> None:
     restored = deserialize_settings(
         {
             "pixel_width": 0,
+            "orphan_min_similar_neighbors": 99,
+            "anti_alias_alpha_threshold": -999,
             "palette_reduction_colors": 999,
             "generated_shades": 9,
             "auto_detect_count": 99,
@@ -102,6 +124,8 @@ def test_deserialize_settings_clamps_advanced_palette_controls() -> None:
         }
     )
     assert restored.pixel_width == 1
+    assert restored.orphan_min_similar_neighbors == 8
+    assert restored.anti_alias_alpha_threshold == 1
     assert restored.palette_reduction_colors == 256
     assert restored.generated_shades == 8
     assert restored.auto_detect_count == 24

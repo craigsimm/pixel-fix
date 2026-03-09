@@ -4,11 +4,11 @@ from PIL import Image
 
 import pixel_fix.gui.app as app_module
 from pixel_fix.gui.app import PaletteUndoState, PixelFixGui
-from pixel_fix.gui.processing import downsample_image, process_image, reduce_palette_image
+from pixel_fix.gui.processing import ProcessResult, ProcessStats, downsample_image, process_image, reduce_palette_image
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.palette.advanced import generate_structured_palette
 from pixel_fix.palette.workspace import ColorWorkspace
-from pixel_fix.pipeline import PipelineConfig
+from pixel_fix.pipeline import PipelineConfig, PipelinePreparedResult
 
 
 def _sample_grid():
@@ -33,10 +33,39 @@ def test_downsample_image_returns_metadata_and_progress() -> None:
     assert result.stats.pixel_width == 2
     assert result.stats.output_size == (2, 2)
     assert result.stats.color_count == 4
+    assert result.stats.anti_alias_pixels_fixed == 0
+    assert result.stats.orphan_pixels_replaced == 0
+    assert result.stats.gap_pixels_filled == 0
+    assert result.display_palette_labels == (0xFF0000, 0x0000FF, 0x00FF00, 0xFFFF00)
     assert progress == [
         (10, "Preparing input"),
         (35, "Downsampling with Nearest Neighbor..."),
     ]
+
+
+def test_downsample_image_uses_rgba_anti_alias_cleanup() -> None:
+    rgba = Image.new("RGBA", (3, 3), (255, 255, 255, 255))
+    pixels = rgba.load()
+    for y in range(3):
+        pixels[0, y] = (0, 0, 0, 255)
+        pixels[1, y] = (0, 0, 0, 255)
+    pixels[1, 1] = (32, 32, 32, 128)
+    rgb_grid = [
+        [(0, 0, 0), (0, 0, 0), (255, 255, 255)],
+        [(0, 0, 0), (32, 32, 32), (255, 255, 255)],
+        [(0, 0, 0), (0, 0, 0), (255, 255, 255)],
+    ]
+
+    result = downsample_image(
+        rgb_grid,
+        PipelineConfig(pixel_width=1, anti_alias_removal_enabled=True, anti_alias_alpha_threshold=224),
+        source_rgba=rgba,
+    )
+
+    assert result.grid[1][1] == (0, 0, 0)
+    assert result.stats.anti_alias_pixels_fixed == 1
+    assert result.stats.orphan_pixels_replaced == 0
+    assert result.stats.gap_pixels_filled == 0
 
 
 def test_reduce_palette_image_uses_prepared_input() -> None:
@@ -60,6 +89,9 @@ def test_reduce_palette_image_uses_prepared_input() -> None:
     assert reduced.stats.palette_strategy == "advanced"
     assert reduced.stats.effective_palette_size == reduced.structured_palette.palette_size()
     assert reduced.structured_palette.generated_shades == 2
+    assert reduced.stats.anti_alias_pixels_fixed == 0
+    assert reduced.stats.orphan_pixels_replaced == 0
+    assert reduced.stats.gap_pixels_filled == 0
     assert progress == [
         (65, "Using generated palette..."),
         (90, "Finalizing output..."),
@@ -85,6 +117,7 @@ def test_process_image_reuses_prepared_downsample() -> None:
     assert second.stats.pixel_width == 2
     assert second.structured_palette is not None
     assert second.stats.ramp_count == len(second.structured_palette.ramps)
+    assert second.stats.anti_alias_pixels_fixed == 0
     assert progress == [
         (10, "Preparing input"),
         (35, "Reusing downsampled image..."),
@@ -212,6 +245,78 @@ def test_update_key_color_list_refreshes_count_label() -> None:
     assert entries == ["#111111", "#222222", "#333333"]
 
 
+def test_get_display_palette_reuses_cached_process_labels_for_neutral_adjustments() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.palette_result = None
+    gui.downsample_result = ProcessResult(
+        grid=[],
+        width=0,
+        height=0,
+        stats=ProcessStats(
+            stage="downsample",
+            pixel_width=1,
+            resize_method="nearest",
+            input_size=(0, 0),
+            output_size=(0, 0),
+            initial_color_count=0,
+            color_count=2,
+            elapsed_seconds=0.0,
+        ),
+        prepared_input=PipelinePreparedResult(
+            reduced_labels=[],
+            pixel_width=1,
+            grid_method="manual",
+            input_size=(0, 0),
+            initial_color_count=0,
+        ),
+        display_palette_labels=(0x112233, 0x445566),
+    )
+    gui.session = SimpleNamespace(current=PreviewSettings())
+    gui._current_adjusted_structured_palette = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected palette rebuild"))
+
+    palette, source = PixelFixGui._get_display_palette(gui)
+
+    assert palette == [0x112233, 0x445566]
+    assert source == "Downsample"
+
+
+def test_current_adjusted_structured_palette_reuses_cached_result(monkeypatch) -> None:
+    calls = 0
+    original = app_module.adjust_structured_palette
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "adjust_structured_palette", counted)
+
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.active_palette = [0x112233, 0x445566]
+    gui.active_palette_source = "Loaded"
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.palette_result = None
+    gui.downsample_result = None
+    gui.session = SimpleNamespace(current=PreviewSettings(palette_brightness=10))
+    gui.workspace = ColorWorkspace()
+    gui._adjusted_palette_cache_key = None
+    gui._adjusted_palette_cache = None
+
+    first = PixelFixGui._current_adjusted_structured_palette(gui)
+    second = PixelFixGui._current_adjusted_structured_palette(gui)
+
+    assert first is not second
+    assert first is not None
+    assert second is not None
+    assert first.labels() == second.labels()
+    assert calls == 1
+
+
 def test_remove_selected_seed_removes_multiple_key_colours() -> None:
     messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
@@ -337,6 +442,54 @@ def test_palette_reduction_settings_change_does_not_mark_output_stale() -> None:
     assert messages == ["Palette reduction settings changed. Click Generate Reduced Palette to rebuild the palette.", "persist", "refresh"]
 
 
+def test_cleanup_setting_change_marks_downsample_stale_and_clears_cache() -> None:
+    messages: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.prepared_input_cache = object()
+    gui.prepared_input_cache_key = ("cached",)
+    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
+    gui._clear_palette_undo_state = lambda: messages.append("clear")
+    gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
+    gui._update_key_color_list = lambda: messages.append("list")
+    gui._update_palette_adjustment_labels = lambda: messages.append("adjust")
+    gui._update_downsample_cleanup_controls = lambda: messages.append("cleanup")
+    gui._update_scale_info = lambda: messages.append("scale")
+    gui._update_palette_strip = lambda: messages.append("palette")
+    gui.redraw_canvas = lambda: messages.append("redraw")
+    gui._schedule_state_persist = lambda: messages.append("persist")
+    gui._refresh_action_states = lambda: messages.append("refresh")
+
+    PixelFixGui._handle_settings_transition(
+        gui,
+        PreviewSettings(),
+        PreviewSettings(orphan_cleanup_enabled=True),
+    )
+
+    assert gui.prepared_input_cache is None
+    assert gui.prepared_input_cache_key is None
+    assert messages == [
+        "clear",
+        "stale:Downsample settings changed. Click Downsample to update the preview.",
+        "list",
+        "adjust",
+        "cleanup",
+        "scale",
+        "palette",
+        "redraw",
+        "persist",
+        "refresh",
+    ]
+
+
+def test_prepare_cache_key_includes_cleanup_settings() -> None:
+    assert PixelFixGui._build_prepare_cache_key(PreviewSettings()) != PixelFixGui._build_prepare_cache_key(
+        PreviewSettings(orphan_cleanup_enabled=True)
+    )
+    assert PixelFixGui._build_prepare_cache_key(PreviewSettings()) != PixelFixGui._build_prepare_cache_key(
+        PreviewSettings(anti_alias_alpha_threshold=200)
+    )
+
+
 def test_generate_override_palette_uses_downsampled_labels_and_marks_stale(monkeypatch) -> None:
     captured: dict[str, object] = {}
     gui = PixelFixGui.__new__(PixelFixGui)
@@ -394,6 +547,60 @@ def test_generate_override_palette_requires_downsample(monkeypatch) -> None:
     PixelFixGui._generate_override_palette_from_settings(gui, gui.session.current)
 
     assert messages == ["Downsample the image before generating an override palette."]
+
+
+def test_load_palette_file_browses_for_gpl_files(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._resolve_palette_path = lambda value: str(value)
+    gui._apply_active_palette = lambda palette, source, path_value, *, message, mark_stale=True: captured.update(
+        {
+            "palette": palette,
+            "source": source,
+            "path_value": path_value,
+            "message": message,
+            "mark_stale": mark_stale,
+        }
+    )
+
+    def fake_askopenfilename(**kwargs):
+        captured["filetypes"] = kwargs["filetypes"]
+        return "example.gpl"
+
+    monkeypatch.setattr(app_module.filedialog, "askopenfilename", fake_askopenfilename)
+    monkeypatch.setattr(app_module, "load_palette", lambda path: [0x112233, 0x445566])
+
+    PixelFixGui.load_palette_file(gui)
+
+    assert captured["filetypes"][0] == ("GIMP Palette", "*.gpl")
+    assert captured["palette"] == [0x112233, 0x445566]
+    assert captured["source"] == "Loaded: example.gpl"
+    assert captured["path_value"] == "example.gpl"
+    assert captured["message"] == "Loaded palette from example.gpl. Click Apply Palette to update the preview."
+    assert captured["mark_stale"] is True
+
+
+def test_save_palette_file_uses_gpl_dialog(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._get_display_palette = lambda: ([0x112233, 0x445566], "Generated")
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+
+    def fake_asksaveasfilename(**kwargs):
+        captured["defaultextension"] = kwargs["defaultextension"]
+        captured["filetypes"] = kwargs["filetypes"]
+        return "saved-palette.gpl"
+
+    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", fake_asksaveasfilename)
+    monkeypatch.setattr(app_module, "save_palette", lambda path, palette: captured.update({"path": path, "palette": palette}))
+
+    PixelFixGui.save_palette_file(gui)
+
+    assert captured["defaultextension"] == ".gpl"
+    assert captured["filetypes"] == [("GIMP Palette", "*.gpl")]
+    assert str(captured["path"]).endswith("saved-palette.gpl")
+    assert captured["palette"] == [0x112233, 0x445566]
+    assert gui.process_status_var.value == "Saved palette to saved-palette.gpl"
 
 
 def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> None:

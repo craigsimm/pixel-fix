@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from PIL import Image
+
+from pixel_fix.cleanup.filters import clean_orphan_pixels, remove_anti_aliased_edges
 from pixel_fix.io import copy_as_placeholder, validate_input_path, validate_output_path
 from pixel_fix.palette.advanced import (
     generate_structured_palette,
@@ -34,6 +37,11 @@ class PipelineConfig:
     output_mode: str = "rgba"
     quantizer: str = "topk"
     dither_mode: str = "none"
+    orphan_cleanup_enabled: bool = False
+    orphan_min_similar_neighbors: int = 1
+    orphan_fill_gaps: bool = True
+    anti_alias_removal_enabled: bool = False
+    anti_alias_alpha_threshold: int = 224
     palette_path: Path | None = None
     save_palette_path: Path | None = None
     # Legacy fields kept for compatibility with older settings/tests; they are no
@@ -58,6 +66,9 @@ class PipelineRunResult:
     pixel_width: int
     grid_method: str
     removed_isolated_pixels: int
+    anti_alias_pixels_fixed: int = 0
+    orphan_pixels_replaced: int = 0
+    gap_pixels_filled: int = 0
     structured_palette: "StructuredPalette | None" = None
     palette_indices: list[list[int]] | None = None
     ramp_index_grid: list[list[int]] | None = None
@@ -76,6 +87,9 @@ class PipelinePreparedResult:
     grid_method: str
     input_size: tuple[int, int]
     initial_color_count: int
+    anti_alias_pixels_fixed: int = 0
+    orphan_pixels_replaced: int = 0
+    gap_pixels_filled: int = 0
 
 
 class PixelFixPipeline:
@@ -103,24 +117,55 @@ class PixelFixPipeline:
         progress_callback: PipelineProgressCallback | None = None,
         *,
         grid_message: str = "Downsampling image...",
+        source_rgba: Image.Image | None = None,
     ) -> PipelinePreparedResult:
         if self.config.input_mode not in COLOR_MODES or self.config.output_mode not in COLOR_MODES:
             raise ValueError("Unsupported color mode")
 
+        workspace = ColorWorkspace()
         self._emit_progress(progress_callback, 10, "Preparing input")
-        normalized = convert_mode(labels, self.config.input_mode)
+        anti_alias_pixels_fixed = 0
+        input_labels = [row[:] for row in labels]
+        if self.config.anti_alias_removal_enabled and source_rgba is not None:
+            expected_size = (len(labels[0]) if labels else 0, len(labels))
+            if source_rgba.size != expected_size:
+                raise ValueError("source_rgba size must match the input label grid")
+            anti_alias_result = remove_anti_aliased_edges(
+                source_rgba,
+                alpha_cutoff=max(1, min(255, int(self.config.anti_alias_alpha_threshold))),
+                workspace=workspace,
+            )
+            anti_alias_pixels_fixed = anti_alias_result.replaced_pixels
+            input_labels = _rgba_image_to_labels(anti_alias_result.image)
+
+        normalized = convert_mode(input_labels, self.config.input_mode)
         height = len(normalized)
         width = len(normalized[0]) if height else 0
         initial_color_count = len(extract_unique_colors(normalized))
         pixel_width = self._resolve_pixel_width()
         self._emit_progress(progress_callback, 35, grid_message)
         reduced = resize_labels(normalized, pixel_width, method=self.config.downsample_mode)
+        orphan_pixels_replaced = 0
+        gap_pixels_filled = 0
+        if self.config.orphan_cleanup_enabled:
+            cleanup_result = clean_orphan_pixels(
+                reduced,
+                min_similar_neighbors=max(0, int(self.config.orphan_min_similar_neighbors)),
+                fill_gaps=bool(self.config.orphan_fill_gaps),
+                workspace=workspace,
+            )
+            reduced = cleanup_result.labels
+            orphan_pixels_replaced = cleanup_result.orphan_pixels_replaced
+            gap_pixels_filled = cleanup_result.gap_pixels_filled
         return PipelinePreparedResult(
             reduced_labels=reduced,
             pixel_width=pixel_width,
             grid_method="manual",
             input_size=(width, height),
             initial_color_count=initial_color_count,
+            anti_alias_pixels_fixed=anti_alias_pixels_fixed,
+            orphan_pixels_replaced=orphan_pixels_replaced,
+            gap_pixels_filled=gap_pixels_filled,
         )
 
     def run_prepared_labels(
@@ -182,7 +227,10 @@ class PixelFixPipeline:
             labels=output,
             pixel_width=prepared.pixel_width,
             grid_method=prepared.grid_method,
-            removed_isolated_pixels=0,
+            removed_isolated_pixels=prepared.orphan_pixels_replaced,
+            anti_alias_pixels_fixed=prepared.anti_alias_pixels_fixed,
+            orphan_pixels_replaced=prepared.orphan_pixels_replaced,
+            gap_pixels_filled=prepared.gap_pixels_filled,
             structured_palette=palette_data,
             palette_indices=mapping.palette_indices,
             ramp_index_grid=mapping.ramp_index_grid,
@@ -227,3 +275,15 @@ class PixelFixPipeline:
         validate_input_path(input_path)
         validate_output_path(output_path, overwrite=self.config.overwrite)
         copy_as_placeholder(input_path, output_path)
+
+
+def _rgba_image_to_labels(image: Image.Image) -> list[list[int]]:
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    if width == 0 or height == 0:
+        return []
+    pixels = rgb.load()
+    return [
+        [((pixels[x, y][0] << 16) | (pixels[x, y][1] << 8) | pixels[x, y][2]) for x in range(width)]
+        for y in range(height)
+    ]

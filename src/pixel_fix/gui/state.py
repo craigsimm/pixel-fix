@@ -7,6 +7,11 @@ from dataclasses import dataclass, replace
 class PreviewSettings:
     pixel_width: int = 2
     downsample_mode: str = "nearest"
+    orphan_cleanup_enabled: bool = False
+    orphan_min_similar_neighbors: int = 1
+    orphan_fill_gaps: bool = True
+    anti_alias_removal_enabled: bool = False
+    anti_alias_alpha_threshold: int = 224
     palette_reduction_colors: int = 16
     generated_shades: int = 4
     auto_detect_count: int = 12
