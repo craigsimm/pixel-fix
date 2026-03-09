@@ -59,7 +59,21 @@ def test_builtin_palette_menu_uses_catalog_tree(monkeypatch, tmp_path: Path) -> 
         assert builtins_menu.entrycget(0, "label") == "DawnBringer"
         folder_menu = builtins_menu.nametowidget(builtins_menu.entrycget(0, "menu"))
         assert folder_menu.entrycget(0, "label") == "DB16"
-        assert gui._menu_items["palette"].entrycget(5, "label") == "Save Current Palette..."
+        palette_labels = [
+            gui._menu_items["palette"].entrycget(index, "label")
+            for index in range(gui._menu_items["palette"].index("end") + 1)
+            if gui._menu_items["palette"].type(index) != "separator"
+        ]
+        assert "Generate Override Palette" not in palette_labels
+        assert "Save Current Palette..." in palette_labels
+        preference_labels = [
+            gui._menu_items["preferences"].entrycget(index, "label")
+            for index in range(gui._menu_items["preferences"].index("end") + 1)
+            if gui._menu_items["preferences"].type(index) != "separator"
+        ]
+        assert "Palette Reduction Method" in preference_labels
+        assert "Colour Ramp" in preference_labels
+        assert "Dithering Method" in preference_labels
     finally:
         gui.root.destroy()
 

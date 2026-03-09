@@ -73,6 +73,16 @@ def test_quantizer_and_dither_pipeline_bits() -> None:
     assert {v for row in dithered for v in row}.issubset(set(palette))
 
 
+def test_generate_palette_supports_median_cut() -> None:
+    labels = [
+        [0x112233, 0x112233, 0x445566, 0x445566],
+        [0x778899, 0x778899, 0xAABBCC, 0xAABBCC],
+    ]
+    palette = generate_palette(labels, colors=2, method="median-cut")
+    assert len(palette) == 2
+    assert all(isinstance(value, int) for value in palette)
+
+
 def test_color_replacement_variants() -> None:
     labels = [[0x101010, 0x202020], [0x111111, 0x303030]]
     assert replace_exact(labels, 0x202020, 0xAAAAAA)[0][1] == 0xAAAAAA
@@ -128,14 +138,14 @@ def test_generate_structured_palette_builds_monotonic_ramps() -> None:
         assert ramp.colors[len(ramp.colors) // 2].is_seed
 
 
-def test_generate_structured_palette_caps_key_colours_at_twelve() -> None:
+def test_generate_structured_palette_caps_key_colours_at_twenty_four() -> None:
     computation = generate_structured_palette(
         [],
-        key_colors=[index for index in range(16)],
+        key_colors=[index for index in range(32)],
         generated_shades=2,
     )
-    assert len(computation.palette.key_colors) == 12
-    assert len(computation.palette.ramps) == 12
+    assert len(computation.palette.key_colors) == 24
+    assert len(computation.palette.ramps) == 24
 
 
 def test_detect_key_colors_ignores_transparent_pixels() -> None:

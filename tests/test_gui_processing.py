@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 import pixel_fix.gui.app as app_module
-from pixel_fix.gui.app import CanvasDisplay, PaletteUndoState, PixelFixGui
+from pixel_fix.gui.app import PaletteUndoState, PixelFixGui
 from pixel_fix.gui.processing import downsample_image, process_image, reduce_palette_image
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.palette.advanced import generate_structured_palette
@@ -153,10 +153,10 @@ def test_add_key_color_ignores_duplicates() -> None:
     assert "already in the key-colour list" in messages[-1]
 
 
-def test_add_key_color_allows_twelve_and_blocks_thirteen() -> None:
+def test_add_key_color_allows_twenty_four_and_blocks_twenty_five() -> None:
     messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
-    gui.key_colors = [index for index in range(12)]
+    gui.key_colors = [index for index in range(24)]
     gui.advanced_palette_preview = object()
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
     gui._update_key_color_list = lambda: None
@@ -166,8 +166,38 @@ def test_add_key_color_allows_twelve_and_blocks_thirteen() -> None:
 
     PixelFixGui._add_key_color(gui, 0x123456)
 
-    assert len(gui.key_colors) == 12
-    assert messages[-1] == "You can only pick up to 12 key colours."
+    assert len(gui.key_colors) == 24
+    assert messages[-1] == "You can only pick up to 24 key colours."
+
+
+def test_update_key_color_list_refreshes_count_label() -> None:
+    entries: list[str] = []
+
+    class ListboxStub:
+        def curselection(self):
+            return ()
+
+        def delete(self, *_args):
+            entries.clear()
+
+        def insert(self, _index, value):
+            entries.append(value)
+
+        def itemconfig(self, *_args, **_kwargs):
+            return None
+
+        def selection_set(self, *_args):
+            return None
+
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.key_colors = [0x111111, 0x222222, 0x333333]
+    gui.key_colors_label_var = SimpleNamespace(value="", set=lambda value: setattr(gui.key_colors_label_var, "value", value))
+    gui.key_color_listbox = ListboxStub()
+
+    PixelFixGui._update_key_color_list(gui)
+
+    assert gui.key_colors_label_var.value == "Key colours (3)"
+    assert entries == ["#111111", "#222222", "#333333"]
 
 
 def test_remove_selected_seed_removes_multiple_key_colours() -> None:
@@ -273,37 +303,120 @@ def test_auto_detect_count_change_does_not_mark_output_stale() -> None:
     assert messages == ["Auto-detect count set to 6.", "persist", "refresh"]
 
 
-def test_scale_overlay_is_disabled_while_picking_key_colours() -> None:
+def test_palette_reduction_settings_change_does_not_mark_output_stale() -> None:
+    messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
-    gui.original_display_image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-    gui.quick_compare_active = False
-    gui.key_color_pick_mode = True
-    gui.view_var = SimpleNamespace(get=lambda: "original")
+    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
+    gui._clear_palette_undo_state = lambda: messages.append("clear")
+    gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
+    gui._update_key_color_list = lambda: messages.append("list")
+    gui._update_scale_info = lambda: messages.append("scale")
+    gui._update_palette_strip = lambda: messages.append("palette")
+    gui.redraw_canvas = lambda: messages.append("redraw")
+    gui._schedule_state_persist = lambda: messages.append("persist")
+    gui._refresh_action_states = lambda: messages.append("refresh")
 
-    assert PixelFixGui._scale_overlay_active(gui) is False
+    PixelFixGui._handle_settings_transition(
+        gui,
+        PreviewSettings(palette_reduction_colors=16, quantizer="median-cut"),
+        PreviewSettings(palette_reduction_colors=24, quantizer="kmeans"),
+    )
+
+    assert messages == ["Palette reduction settings changed. Click Generate Reduced Palette to rebuild the palette.", "persist", "refresh"]
 
 
-def test_draw_scale_overlay_no_longer_renders_corner_text() -> None:
-    calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+def test_generate_override_palette_uses_downsampled_labels_and_marks_stale(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "processed_current"
+    gui.prepared_input_cache = SimpleNamespace(
+        reduced_labels=[
+            [0x111111, 0x222222],
+            [0x333333, 0x444444],
+        ]
+    )
+    gui.active_palette = None
+    gui.advanced_palette_preview = SimpleNamespace(palette_size=lambda: 6)
+    gui.key_colors = []
+    gui.session = SimpleNamespace(current=PreviewSettings(palette_reduction_colors=24, quantizer="kmeans", generated_shades=4))
+    gui._apply_active_palette = lambda palette, source, path_value, *, message, mark_stale=True: captured.update(
+        {
+            "palette": palette,
+            "source": source,
+            "path_value": path_value,
+            "message": message,
+            "mark_stale": mark_stale,
+        }
+    )
 
-    class CanvasStub:
-        def create_line(self, *args, **kwargs):
-            calls.append(("line", args, kwargs))
+    def fake_generate(labels, colors, method):
+        captured["labels"] = labels
+        captured["colors"] = colors
+        captured["method"] = method
+        return [0xAAAAAA, 0xBBBBBB, 0xCCCCCC]
 
-        def create_text(self, *args, **kwargs):
-            calls.append(("text", args, kwargs))
+    monkeypatch.setattr(app_module, "generate_override_palette", fake_generate)
+
+    PixelFixGui._generate_override_palette_from_settings(gui, gui.session.current)
+
+    assert captured["labels"] == gui.prepared_input_cache.reduced_labels
+    assert captured["colors"] == 4
+    assert captured["method"] == "kmeans"
+    assert captured["palette"] == [0xAAAAAA, 0xBBBBBB, 0xCCCCCC]
+    assert captured["source"] == "Generated Override: K-Means Clustering"
+    assert captured["path_value"] is None
+    assert captured["mark_stale"] is True
+    assert captured["message"] == "Generated a 3-colour override palette with K-Means Clustering. Click Apply Palette to use it."
+
+
+def test_generate_override_palette_requires_downsample(monkeypatch) -> None:
+    messages: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "loaded_original"
+    gui.prepared_input_cache = None
+    gui.session = SimpleNamespace(current=PreviewSettings())
+    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
+
+    monkeypatch.setattr(app_module, "generate_override_palette", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    PixelFixGui._generate_override_palette_from_settings(gui, gui.session.current)
+
+    assert messages == ["Downsample the image before generating an override palette."]
+
+
+def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> None:
+    rectangles: list[tuple[object, ...]] = []
+    palette_info = SimpleNamespace(value="", set=lambda value: setattr(palette_info, "value", value))
+
+    class PaletteCanvasStub:
+        def delete(self, *_args):
+            rectangles.clear()
+
+        def configure(self, **_kwargs):
+            return None
+
+        def winfo_width(self):
+            return 240
+
+        def create_rectangle(self, *args, **_kwargs):
+            rectangles.append(args)
+
+        def create_text(self, *_args, **_kwargs):
+            raise AssertionError("Palette preview should not render grouped ramp labels.")
 
     gui = PixelFixGui.__new__(PixelFixGui)
-    gui.canvas = CanvasStub()
-    gui.original_display_image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-    gui.comparison_original_image = None
-    gui.quick_compare_active = False
-    gui.key_color_pick_mode = False
-    gui.view_var = SimpleNamespace(get=lambda: "original")
-    gui.session = SimpleNamespace(current=PreviewSettings(pixel_width=2))
-    gui._display_context = CanvasDisplay(0, 0, 40, 40, gui.original_display_image)
+    gui.palette_canvas = PaletteCanvasStub()
+    gui.palette_info_var = palette_info
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.advanced_palette_preview = generate_structured_palette(
+        [],
+        key_colors=[0x336699, 0xCC8844],
+        generated_shades=2,
+    ).palette
+    gui._current_output_result = lambda: None
 
-    PixelFixGui._draw_scale_overlay(gui)
+    PixelFixGui._update_palette_strip(gui)
 
-    assert any(kind == "line" for kind, _args, _kwargs in calls)
-    assert not any(kind == "text" for kind, _args, _kwargs in calls)
+    assert len(rectangles) == gui.advanced_palette_preview.palette_size()
+    assert palette_info.value == f"Palette: Generated ({gui.advanced_palette_preview.palette_size()} colours)"

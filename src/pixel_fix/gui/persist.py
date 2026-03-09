@@ -15,13 +15,14 @@ PROCESS_LOG_FILE_NAME = "process.log"
 SETTING_LABELS = {
     "pixel_width": "Pixel size",
     "downsample_mode": "Resize method",
-    "generated_shades": "Generated shades",
+    "palette_reduction_colors": "Palette reduction colours",
+    "generated_shades": "Ramp steps",
     "auto_detect_count": "Auto-detect count",
-    "contrast_bias": "Contrast bias",
-    "palette_dither_mode": "Palette dithering",
+    "contrast_bias": "Ramp contrast",
+    "palette_dither_mode": "Dithering method",
     "input_mode": "Input mode",
     "output_mode": "Output mode",
-    "quantizer": "Quantizer",
+    "quantizer": "Palette reduction method",
     "dither_mode": "Dithering",
     "palette_size": "Palette size",
     "palette_source": "Palette source",
@@ -54,6 +55,7 @@ def serialize_settings(settings: PreviewSettings) -> dict[str, Any]:
     return {
         "pixel_width": settings.pixel_width,
         "downsample_mode": settings.downsample_mode,
+        "palette_reduction_colors": settings.palette_reduction_colors,
         "generated_shades": settings.generated_shades,
         "auto_detect_count": settings.auto_detect_count,
         "contrast_bias": settings.contrast_bias,
@@ -71,13 +73,14 @@ def deserialize_settings(data: dict[str, Any] | None) -> PreviewSettings:
     return PreviewSettings(
         pixel_width=max(1, _as_int(data.get("pixel_width"), 2)),
         downsample_mode=str(data.get("downsample_mode", "nearest")),
+        palette_reduction_colors=_coerce_palette_reduction_colors(data.get("palette_reduction_colors", 16)),
         generated_shades=_coerce_generated_shades(data.get("generated_shades", data.get("ramp_length", 4))),
         auto_detect_count=_coerce_auto_detect_count(data.get("auto_detect_count", 12)),
-        contrast_bias=max(0.0, min(2.0, _as_float(data.get("contrast_bias"), 1.0))),
+        contrast_bias=_coerce_ramp_contrast(data.get("contrast_bias", 1.0)),
         palette_dither_mode=str(data.get("palette_dither_mode", data.get("dither_mode", "none"))),
         input_mode=str(data.get("input_mode", "rgba")),
         output_mode=str(data.get("output_mode", "rgba")),
-        quantizer=str(data.get("quantizer", "topk")),
+        quantizer=_coerce_palette_reduction_method(data.get("quantizer", "median-cut")),
         dither_mode=str(data.get("dither_mode", "none")),
     )
 
@@ -172,7 +175,26 @@ def _coerce_generated_shades(value: Any) -> int:
 
 
 def _coerce_auto_detect_count(value: Any) -> int:
-    return max(1, min(12, _as_int(value, 12)))
+    return max(1, min(24, _as_int(value, 12)))
+
+
+def _coerce_palette_reduction_colors(value: Any) -> int:
+    return max(1, min(256, _as_int(value, 16)))
+
+
+def _coerce_ramp_contrast(value: Any) -> float:
+    parsed = _as_float(value, 1.0)
+    allowed = tuple(index / 10.0 for index in range(1, 11))
+    return min(allowed, key=lambda candidate: abs(candidate - parsed))
+
+
+def _coerce_palette_reduction_method(value: Any) -> str:
+    parsed = str(value or "median-cut").strip().lower()
+    if parsed == "topk":
+        return "median-cut"
+    if parsed in {"median-cut", "kmeans"}:
+        return parsed
+    return "median-cut"
 
 
 def _format_snapshot_value(key: str, value: Any) -> str:
