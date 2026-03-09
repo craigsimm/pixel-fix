@@ -40,13 +40,15 @@ From one interface, you can:
   - `Nearest Neighbor`
   - `Bilinear Interpolation`
   - `RotSprite`
+  - optional stray-pixel cleanup and anti-aliased edge cleanup
 - Build palettes in several ways:
   - pick up to 24 key colours manually from the original image
   - auto-detect key colours from the original image
   - generate colour ramps from those key colours
   - generate reduced palettes with `Median Cut` or `K-Means Clustering`
   - load bundled `.gpl` palettes from the `palettes/` tree
-  - load external `.json` or `.gpl` palettes
+  - browse for and load external `.gpl` palettes
+  - load legacy `.json` palettes
 - Adjust the current palette non-destructively with:
   - `Brightness`
   - `Contrast`
@@ -55,22 +57,23 @@ From one interface, you can:
 - Apply the current palette only when you click `Apply Palette`.
 - Compare processed vs original quickly with the processed/original view toggle and right-click quick compare.
 - Zoom up to `1600%`.
-- Save the current palette as JSON.
+- Save the current palette as `.gpl`.
 - Save the processed image as PNG.
 
 ## Recommended GUI workflow
 
 1. Open an image.
 2. Set the pixel size in `1. Determine pixel scale`.
-3. Click `Downsample`.
-4. Choose how to build the palette:
+3. Optionally enable stray-pixel cleanup or anti-aliased edge cleanup in `2. Downsample`.
+4. Click `Downsample`.
+5. Choose how to build the palette:
    - manual key colours + `Generate Ramps`
    - `Auto Detect Key Colours` + `Generate Ramps`
    - `Generate Reduced Palette`
    - built-in or loaded palette
-5. Optionally tweak the current palette in `4. Adjust palette`.
-6. Click `Apply Palette`.
-7. Compare the result against the original, then save the image or save the palette.
+6. Optionally tweak the current palette in `4. Adjust palette`.
+7. Click `Apply Palette`.
+8. Compare the result against the original, then save the image or save the palette.
 
 The important design rule is:
 
@@ -103,6 +106,16 @@ Downsampling is handled in [`src/pixel_fix/resample.py`](./src/pixel_fix/resampl
   - This can preserve some sprite-like edge character better than plain bilinear.
 
 The output of this stage is the reduced working image that all later palette work operates on.
+
+The downsample stage can also apply two optional cleanup passes before palette work:
+
+- `Remove anti-aliased edges`
+  - scans semi-transparent source pixels before reduction
+  - snaps edge pixels back to the nearest solid neighbour colour on strong edges
+- `Remove stray pixels`
+  - scans the reduced grid with 8-way neighbourhood checks
+  - replaces isolated colours that do not have enough similar neighbours
+  - can optionally fill 1px gaps inside larger shapes
 
 ### 3. Build or select a palette
 
@@ -159,8 +172,8 @@ Palette files are loaded through [`src/pixel_fix/palette/io.py`](./src/pixel_fix
 
 Supported formats:
 
-- JSON palette files used by this project
-- GIMP `.gpl` files
+- GIMP `.gpl` files for loading and saving
+- legacy JSON palette files used by older versions of this project
 
 The GUI also scans the repository `palettes/` folder recursively and mirrors its folder structure as nested submenus, so bundled palettes stay organized the same way in the app as they are on disk.
 

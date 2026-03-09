@@ -30,6 +30,7 @@ from .persist import (
     serialize_settings,
 )
 from .processing import (
+    ProcessStats,
     ProcessResult,
     RGBGrid,
     display_resize_method,
@@ -140,6 +141,8 @@ class PixelFixGui:
         self.key_colors: list[int] = []
         self.advanced_palette_preview: StructuredPalette | None = None
         self.key_color_pick_mode = False
+        self._adjusted_palette_cache_key: tuple[object, ...] | None = None
+        self._adjusted_palette_cache: StructuredPalette | None = None
         self.builtin_palette_entries = discover_palette_catalog(self._resource_path("palettes"))
         self._builtin_palette_by_path = {str(entry.path): entry for entry in self.builtin_palette_entries}
         self.last_output_path = persisted.get("last_output_path")
@@ -165,6 +168,11 @@ class PixelFixGui:
             self.view_var.set("original")
         self.pixel_width_var = tk.IntVar()
         self.downsample_mode_var = tk.StringVar()
+        self.orphan_cleanup_var = tk.BooleanVar()
+        self.orphan_min_neighbors_var = tk.IntVar()
+        self.orphan_fill_gaps_var = tk.BooleanVar()
+        self.anti_alias_removal_var = tk.BooleanVar()
+        self.anti_alias_alpha_threshold_var = tk.IntVar()
         self.palette_reduction_colors_var = tk.IntVar()
         self.generated_shades_var = tk.StringVar()
         self.auto_detect_count_var = tk.StringVar()
@@ -337,6 +345,51 @@ class PixelFixGui:
         downsample_section = self._create_section(sidebar, "2. Downsample")
         self.downsample_button = tk.Button(downsample_section, text="Downsample", command=self.downsample_current_image, relief=tk.FLAT, padx=14, pady=4)
         self.downsample_button.pack(anchor=tk.W, pady=(4, 0))
+        self.orphan_cleanup_check = ttk.Checkbutton(
+            downsample_section,
+            text="Remove stray pixels",
+            variable=self.orphan_cleanup_var,
+            command=self._on_settings_changed,
+        )
+        self.orphan_cleanup_check.pack(anchor=tk.W, pady=(8, 0))
+        orphan_row = ttk.Frame(downsample_section)
+        orphan_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(orphan_row, text="Min similar neighbours").pack(side=tk.LEFT)
+        self.orphan_min_neighbors_spinbox = ttk.Spinbox(
+            orphan_row,
+            from_=1,
+            to=8,
+            textvariable=self.orphan_min_neighbors_var,
+            width=8,
+            command=self._on_settings_changed,
+        )
+        self.orphan_min_neighbors_spinbox.pack(side=tk.RIGHT)
+        self.orphan_fill_gaps_check = ttk.Checkbutton(
+            downsample_section,
+            text="Fill 1px gaps",
+            variable=self.orphan_fill_gaps_var,
+            command=self._on_settings_changed,
+        )
+        self.orphan_fill_gaps_check.pack(anchor=tk.W, pady=(4, 0))
+        self.anti_alias_removal_check = ttk.Checkbutton(
+            downsample_section,
+            text="Remove anti-aliased edges",
+            variable=self.anti_alias_removal_var,
+            command=self._on_settings_changed,
+        )
+        self.anti_alias_removal_check.pack(anchor=tk.W, pady=(10, 0))
+        anti_alias_row = ttk.Frame(downsample_section)
+        anti_alias_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(anti_alias_row, text="Edge alpha cutoff").pack(side=tk.LEFT)
+        self.anti_alias_alpha_spinbox = ttk.Spinbox(
+            anti_alias_row,
+            from_=1,
+            to=255,
+            textvariable=self.anti_alias_alpha_threshold_var,
+            width=8,
+            command=self._on_settings_changed,
+        )
+        self.anti_alias_alpha_spinbox.pack(side=tk.RIGHT)
 
         palette_section = self._create_section(sidebar, "3. Apply palette")
         ttk.Label(palette_section, textvariable=self.key_colors_label_var).pack(anchor=tk.W)
@@ -543,6 +596,15 @@ class PixelFixGui:
         self.palette_hue_value_var.set(f"{int(self.palette_hue_var.get())} deg")
         self.palette_saturation_value_var.set(f"{int(self.palette_saturation_var.get())}%")
 
+    def _update_downsample_cleanup_controls(self) -> None:
+        if not hasattr(self, "orphan_cleanup_check"):
+            return
+        orphan_enabled = bool(self.orphan_cleanup_var.get())
+        anti_alias_enabled = bool(self.anti_alias_removal_var.get())
+        self.orphan_min_neighbors_spinbox.configure(state="normal" if orphan_enabled else "disabled")
+        self.orphan_fill_gaps_check.configure(state=tk.NORMAL if orphan_enabled else tk.DISABLED)
+        self.anti_alias_alpha_spinbox.configure(state="normal" if anti_alias_enabled else "disabled")
+
     def _palette_adjustments(self, settings: PreviewSettings | None = None) -> PaletteAdjustments:
         session = getattr(self, "session", None)
         current = settings or getattr(session, "current", PreviewSettings())
@@ -551,6 +613,34 @@ class PixelFixGui:
             contrast=current.palette_contrast,
             hue=current.palette_hue,
             saturation=current.palette_saturation,
+        )
+
+    def _current_palette_source_labels(self) -> tuple[list[int], str]:
+        if self.active_palette:
+            return list(self.active_palette), self.active_palette_source or "Active"
+        if self.advanced_palette_preview is not None:
+            return self.advanced_palette_preview.labels(), self.advanced_palette_preview.source_label or "Generated"
+        current = self._current_output_result()
+        if current is None:
+            return ([], "none")
+        if current.structured_palette is not None:
+            source = current.structured_palette.source_label or current.stats.stage.title()
+            return current.structured_palette.labels(), source
+        if current.display_palette_labels:
+            return list(current.display_palette_labels), current.stats.stage.title()
+        return ([], "none")
+
+    def _adjusted_palette_cache_token(self, adjustments: PaletteAdjustments) -> tuple[object, ...]:
+        current = self._current_output_result()
+        return (
+            adjustments.brightness,
+            adjustments.contrast,
+            adjustments.hue,
+            adjustments.saturation,
+            id(self.active_palette) if self.active_palette is not None else None,
+            id(self.advanced_palette_preview) if self.advanced_palette_preview is not None else None,
+            id(current) if current is not None else None,
+            id(current.structured_palette) if current is not None and current.structured_palette is not None else None,
         )
 
     def _current_base_structured_palette(self) -> StructuredPalette | None:
@@ -566,29 +656,41 @@ class PixelFixGui:
         current = self._current_output_result()
         if current is not None and current.structured_palette is not None:
             return clone_structured_palette(current.structured_palette)
-        if current is not None:
-            base_palette = extract_unique_colors(rgb_to_labels(current.grid))
-            if base_palette:
-                return structured_palette_from_override(
-                    base_palette,
-                    workspace=workspace,
-                    source_label=current.stats.stage.title(),
-                )
+        if current is not None and current.display_palette_labels:
+            return structured_palette_from_override(
+                list(current.display_palette_labels),
+                workspace=workspace,
+                source_label=current.stats.stage.title(),
+            )
         return None
 
     def _current_adjusted_structured_palette(self, settings: PreviewSettings | None = None) -> StructuredPalette | None:
+        adjustments = self._palette_adjustments(settings)
+        cache_key = self._adjusted_palette_cache_token(adjustments)
+        cached_key = getattr(self, "_adjusted_palette_cache_key", None)
+        cached_palette = getattr(self, "_adjusted_palette_cache", None)
+        if cached_key == cache_key and cached_palette is not None:
+            return clone_structured_palette(cached_palette)
         base_palette = self._current_base_structured_palette()
         if base_palette is None or base_palette.palette_size() == 0:
+            self._adjusted_palette_cache_key = cache_key
+            self._adjusted_palette_cache = None
             return None
-        return adjust_structured_palette(
-            base_palette,
-            self._palette_adjustments(settings),
-            workspace=getattr(self, "workspace", None) or ColorWorkspace(),
-        )
+        if adjustments.is_neutral():
+            adjusted_palette = base_palette
+        else:
+            adjusted_palette = adjust_structured_palette(
+                base_palette,
+                adjustments,
+                workspace=getattr(self, "workspace", None) or ColorWorkspace(),
+            )
+        self._adjusted_palette_cache_key = cache_key
+        self._adjusted_palette_cache = clone_structured_palette(adjusted_palette)
+        return adjusted_palette
 
     def _has_palette_source(self) -> bool:
-        adjusted = self._current_adjusted_structured_palette()
-        return adjusted is not None and adjusted.palette_size() > 0
+        palette, _source = self._current_palette_source_labels()
+        return bool(palette)
 
     def _adjusted_palette_source_label(self, palette: StructuredPalette, settings: PreviewSettings | None = None) -> str:
         source = palette.source_label or "Palette"
@@ -1032,8 +1134,8 @@ class PixelFixGui:
     def load_palette_file(self) -> None:
         path = filedialog.askopenfilename(
             filetypes=[
-                ("Palette files", "*.json *.gpl"),
                 ("GIMP Palette", "*.gpl"),
+                ("Palette files", "*.gpl *.json"),
                 ("Palette JSON", "*.json"),
             ]
         )
@@ -1056,7 +1158,7 @@ class PixelFixGui:
         palette, _source = self._get_display_palette()
         if not palette:
             return
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Palette JSON", "*.json")])
+        path = filedialog.asksaveasfilename(defaultextension=".gpl", filetypes=[("GIMP Palette", "*.gpl")])
         if not path:
             return
         try:
@@ -1090,7 +1192,12 @@ class PixelFixGui:
 
         def worker() -> None:
             try:
-                result = downsample_image(self.original_grid or [], config, progress_callback=progress_callback)
+                result = downsample_image(
+                    self.original_grid or [],
+                    config,
+                    source_rgba=self.original_display_image,
+                    progress_callback=progress_callback,
+                )
                 self.root.after(0, lambda: self._handle_downsample_success(result, snapshot, changes, source_size, self._build_prepare_cache_key(settings)))
             except Exception as exc:  # noqa: BLE001
                 self.root.after(0, lambda: self._handle_stage_failure(str(exc), changes, source_size))
@@ -1229,6 +1336,20 @@ class PixelFixGui:
         self._refresh_action_states()
         return True
 
+    @staticmethod
+    def _cleanup_counts_summary(stats: ProcessResult | ProcessStats) -> str:
+        cleanup_bits: list[str] = []
+        anti_alias = stats.stats.anti_alias_pixels_fixed if isinstance(stats, ProcessResult) else stats.anti_alias_pixels_fixed
+        orphan_pixels = stats.stats.orphan_pixels_replaced if isinstance(stats, ProcessResult) else stats.orphan_pixels_replaced
+        gap_pixels = stats.stats.gap_pixels_filled if isinstance(stats, ProcessResult) else stats.gap_pixels_filled
+        if anti_alias:
+            cleanup_bits.append(f"fixed {anti_alias} anti-aliased edge pixels")
+        if orphan_pixels:
+            cleanup_bits.append(f"replaced {orphan_pixels} stray pixels")
+        if gap_pixels:
+            cleanup_bits.append(f"filled {gap_pixels} gaps")
+        return ", ".join(cleanup_bits)
+
     def _handle_downsample_success(
         self,
         result: ProcessResult,
@@ -1251,9 +1372,16 @@ class PixelFixGui:
         self._set_view("processed")
         self.root.update_idletasks()
         self.zoom_fit()
-        self.process_status_var.set(
+        cleanup_summary = self._cleanup_counts_summary(result)
+        status_message = (
             f"Downsampled to {result.width}x{result.height} with {display_resize_method(result.stats.resize_method)} in {result.stats.elapsed_seconds:.2f}s."
         )
+        if cleanup_summary:
+            status_message = f"{status_message} Cleanup: {cleanup_summary}."
+        self.process_status_var.set(status_message)
+        log_message = "Downsample complete"
+        if cleanup_summary:
+            log_message = f"{log_message} ({cleanup_summary})"
         append_process_log(
             source_path_value=str(self.source_path),
             source_size=source_size,
@@ -1261,7 +1389,7 @@ class PixelFixGui:
             color_count=result.stats.color_count,
             changes=changes,
             success=True,
-            message="Downsample complete",
+            message=log_message,
         )
         self._update_palette_strip()
         self._update_image_info()
@@ -1582,10 +1710,15 @@ class PixelFixGui:
         self.palette_canvas.configure(height=min(110, 8 + total_rows * (PALETTE_SWATCH_SIZE + PALETTE_SWATCH_GAP)))
 
     def _get_display_palette(self) -> tuple[list[int], str]:
+        palette, source = self._current_palette_source_labels()
+        if not palette:
+            return ([], "none")
+        if self._palette_adjustments().is_neutral():
+            return palette, source
         adjusted_palette = self._current_adjusted_structured_palette()
         if adjusted_palette is not None:
             return adjusted_palette.labels(), self._adjusted_palette_source_label(adjusted_palette)
-        return ([], "none")
+        return palette, source
 
     def _update_image_info(self) -> None:
         filename = self.source_path.name if self.source_path is not None else "No image"
@@ -1600,6 +1733,11 @@ class PixelFixGui:
         return PreviewSettings(
             pixel_width=pixel_width,
             downsample_mode=RESIZE_DISPLAY_TO_VALUE.get(self.downsample_mode_var.get(), "nearest"),
+            orphan_cleanup_enabled=bool(self.orphan_cleanup_var.get()),
+            orphan_min_similar_neighbors=max(1, min(8, int(self.orphan_min_neighbors_var.get() or 1))),
+            orphan_fill_gaps=bool(self.orphan_fill_gaps_var.get()),
+            anti_alias_removal_enabled=bool(self.anti_alias_removal_var.get()),
+            anti_alias_alpha_threshold=max(1, min(255, int(self.anti_alias_alpha_threshold_var.get() or 224))),
             palette_reduction_colors=max(1, min(256, int(self.palette_reduction_colors_var.get() or 16))),
             generated_shades=max(2, min(10, int(self.generated_shades_var.get() or 4))),
             auto_detect_count=max(1, min(MAX_KEY_COLORS, int(self.auto_detect_count_var.get() or MAX_KEY_COLORS))),
@@ -1620,6 +1758,11 @@ class PixelFixGui:
         try:
             self.pixel_width_var.set(settings.pixel_width)
             self.downsample_mode_var.set(RESIZE_VALUE_TO_DISPLAY.get(settings.downsample_mode, RESIZE_OPTIONS[0][0]))
+            self.orphan_cleanup_var.set(settings.orphan_cleanup_enabled)
+            self.orphan_min_neighbors_var.set(settings.orphan_min_similar_neighbors)
+            self.orphan_fill_gaps_var.set(settings.orphan_fill_gaps)
+            self.anti_alias_removal_var.set(settings.anti_alias_removal_enabled)
+            self.anti_alias_alpha_threshold_var.set(settings.anti_alias_alpha_threshold)
             self.palette_reduction_colors_var.set(settings.palette_reduction_colors)
             self.generated_shades_var.set(str(settings.generated_shades))
             self.auto_detect_count_var.set(str(settings.auto_detect_count))
@@ -1636,6 +1779,7 @@ class PixelFixGui:
         finally:
             self._suspend_control_events = False
         self._update_palette_adjustment_labels()
+        self._update_downsample_cleanup_controls()
 
     def _on_settings_changed(self, _event: tk.Event | None = None) -> None:
         if self._suspend_control_events or self.image_state == "processing":
@@ -1656,6 +1800,11 @@ class PixelFixGui:
             previous.pixel_width != updated.pixel_width
             or previous.downsample_mode != updated.downsample_mode
             or previous.input_mode != updated.input_mode
+            or previous.orphan_cleanup_enabled != updated.orphan_cleanup_enabled
+            or previous.orphan_min_similar_neighbors != updated.orphan_min_similar_neighbors
+            or previous.orphan_fill_gaps != updated.orphan_fill_gaps
+            or previous.anti_alias_removal_enabled != updated.anti_alias_removal_enabled
+            or previous.anti_alias_alpha_threshold != updated.anti_alias_alpha_threshold
         )
         ramp_generation_changed = (
             previous.generated_shades != updated.generated_shades
@@ -1681,7 +1830,7 @@ class PixelFixGui:
             self._clear_palette_undo_state()
             self.prepared_input_cache = None
             self.prepared_input_cache_key = None
-            message = message or "Pixel scale changed. Click Downsample to update the preview."
+            message = message or "Downsample settings changed. Click Downsample to update the preview."
         elif ramp_generation_changed:
             self._clear_palette_undo_state()
             self.advanced_palette_preview = None
@@ -1714,6 +1863,7 @@ class PixelFixGui:
         self._mark_output_stale(message)
         self._update_key_color_list()
         self._update_palette_adjustment_labels()
+        self._update_downsample_cleanup_controls()
         self._update_scale_info()
         self._update_palette_strip()
         self.redraw_canvas()
@@ -1734,6 +1884,11 @@ class PixelFixGui:
         return PipelineConfig(
             pixel_width=settings.pixel_width,
             downsample_mode=settings.downsample_mode,
+            orphan_cleanup_enabled=settings.orphan_cleanup_enabled,
+            orphan_min_similar_neighbors=settings.orphan_min_similar_neighbors,
+            orphan_fill_gaps=settings.orphan_fill_gaps,
+            anti_alias_removal_enabled=settings.anti_alias_removal_enabled,
+            anti_alias_alpha_threshold=settings.anti_alias_alpha_threshold,
             colors=len(self.key_colors) * (settings.generated_shades + 1),
             palette_strategy="override" if self._palette_is_override_mode() else "advanced",
             key_colors=tuple(self._current_key_colors()),
@@ -1748,7 +1903,16 @@ class PixelFixGui:
 
     @staticmethod
     def _build_prepare_cache_key(settings: PreviewSettings) -> tuple[object, ...]:
-        return (settings.pixel_width, settings.downsample_mode, settings.input_mode)
+        return (
+            settings.pixel_width,
+            settings.downsample_mode,
+            settings.input_mode,
+            settings.orphan_cleanup_enabled,
+            settings.orphan_min_similar_neighbors,
+            settings.orphan_fill_gaps,
+            settings.anti_alias_removal_enabled,
+            settings.anti_alias_alpha_threshold,
+        )
 
     def _refresh_action_states(self) -> None:
         busy = self.image_state == "processing"
@@ -1775,7 +1939,15 @@ class PixelFixGui:
             widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
         self.pick_seed_button.configure(text="Cancel Pick" if self.key_color_pick_mode else "Pick Colour")
         self.pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        self.orphan_cleanup_check.configure(state=tk.NORMAL if has_image and not busy else tk.DISABLED)
+        self.anti_alias_removal_check.configure(state=tk.NORMAL if has_image and not busy else tk.DISABLED)
         self.palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        if has_image and not busy:
+            self._update_downsample_cleanup_controls()
+        else:
+            self.orphan_min_neighbors_spinbox.configure(state="disabled")
+            self.orphan_fill_gaps_check.configure(state=tk.DISABLED)
+            self.anti_alias_alpha_spinbox.configure(state="disabled")
         self.key_color_listbox.configure(state=tk.NORMAL if advanced_editable else tk.DISABLED)
         adjustment_state = tk.NORMAL if has_palette_source and not busy else tk.DISABLED
         for control in getattr(self, "palette_adjustment_controls", []):
@@ -1793,7 +1965,7 @@ class PixelFixGui:
         self._menu_items["palette"].entryconfigure("Output Mode", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Built-in Palettes", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Load Palette...", state=tk.NORMAL if not busy else tk.DISABLED)
-        self._menu_items["palette"].entryconfigure("Save Current Palette...", state=tk.NORMAL if bool(self._get_display_palette()[0]) and not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Save Current Palette...", state=tk.NORMAL if self._has_palette_source() and not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Clear Active Palette", state=tk.NORMAL if has_active_palette and not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Resize Method", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Palette Reduction Method", state=tk.NORMAL if not busy else tk.DISABLED)

@@ -29,8 +29,17 @@ def test_unique_palette_and_indexed_limit() -> None:
 
 
 def test_palette_io_roundtrip(tmp_path: Path) -> None:
-    path = tmp_path / "palette.json"
+    path = tmp_path / "palette.gpl"
     save_palette(path, [0x112233, 0xabcdef])
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("GIMP Palette")
+    loaded = load_palette(path)
+    assert loaded == [0x112233, 0xABCDEF]
+
+
+def test_json_palette_load_remains_supported(tmp_path: Path) -> None:
+    path = tmp_path / "palette.json"
+    path.write_text('{"palette": ["#112233", "#abcdef"]}', encoding="utf-8")
     loaded = load_palette(path)
     assert loaded == [0x112233, 0xABCDEF]
 
