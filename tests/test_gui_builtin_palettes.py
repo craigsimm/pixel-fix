@@ -65,6 +65,8 @@ def test_builtin_palette_menu_uses_catalog_tree(monkeypatch, tmp_path: Path) -> 
             if gui._menu_items["palette"].type(index) != "separator"
         ]
         assert "Generate Override Palette" not in palette_labels
+        assert "Add Colour" in palette_labels
+        assert "Clear Active Palette" not in palette_labels
         assert "Save Current Palette..." in palette_labels
         preference_labels = [
             gui._menu_items["preferences"].entrycget(index, "label")
@@ -92,7 +94,7 @@ def test_selecting_builtin_palette_updates_preview_without_processing(monkeypatc
         gui.root.destroy()
 
 
-def test_persisted_builtin_palette_is_restored_on_startup(monkeypatch, tmp_path: Path) -> None:
+def test_persisted_builtin_palette_is_not_restored_on_startup(monkeypatch, tmp_path: Path) -> None:
     palette_root = _create_palette_tree(tmp_path)
     palette_path = str((palette_root / "dawn" / "db16.gpl").resolve())
     gui = _build_gui(
@@ -104,8 +106,34 @@ def test_persisted_builtin_palette_is_restored_on_startup(monkeypatch, tmp_path:
         },
     )
     try:
-        assert gui.active_palette == [0x112233, 0xABCDEF]
-        assert gui.active_palette_source == "Built-in: DawnBringer / DB16"
-        assert gui.palette_info_var.get() == "Palette: Built-in: DawnBringer / DB16 (2 colours)"
+        assert gui.active_palette is None
+        assert gui.active_palette_source == ""
+        assert gui.palette_info_var.get() == "Palette: none"
+    finally:
+        gui.root.destroy()
+
+
+def test_palette_adjustment_sliders_start_neutral_even_when_persisted(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(
+        monkeypatch,
+        tmp_path,
+        persisted={
+            "settings": {
+                "palette_brightness": 25,
+                "palette_contrast": 140,
+                "palette_hue": 15,
+                "palette_saturation": 160,
+            }
+        },
+    )
+    try:
+        assert gui.palette_brightness_var.get() == 0
+        assert gui.palette_contrast_var.get() == 0
+        assert gui.palette_hue_var.get() == 0
+        assert gui.palette_saturation_var.get() == 0
+        assert gui.session.current.palette_brightness == 0
+        assert gui.session.current.palette_contrast == 100
+        assert gui.session.current.palette_hue == 0
+        assert gui.session.current.palette_saturation == 100
     finally:
         gui.root.destroy()
