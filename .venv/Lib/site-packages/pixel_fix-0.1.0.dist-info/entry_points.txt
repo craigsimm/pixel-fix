@@ -1,3 +1,0 @@
-[console_scripts]
-pixel-fix = pixel_fix.cli:main
-pixel-fix-gui = pixel_fix.gui:main
