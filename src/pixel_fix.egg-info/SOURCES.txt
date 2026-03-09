@@ -31,12 +31,15 @@ src/pixel_fix/gui/state.py
 src/pixel_fix/gui/tooltips.py
 src/pixel_fix/gui/zoom.py
 src/pixel_fix/palette/__init__.py
+src/pixel_fix/palette/advanced.py
 src/pixel_fix/palette/catalog.py
 src/pixel_fix/palette/color_modes.py
 src/pixel_fix/palette/dither.py
 src/pixel_fix/palette/io.py
+src/pixel_fix/palette/model.py
 src/pixel_fix/palette/quantize.py
 src/pixel_fix/palette/replace.py
+src/pixel_fix/palette/workspace.py
 tests/test_cleanup.py
 tests/test_grid_scoring.py
 tests/test_gui_builtin_palettes.py

@@ -24,5 +24,12 @@ def test_pipeline_grayscale_output() -> None:
 
 def test_pipeline_accepts_palette_override() -> None:
     labels = [[0x000000, 0xFFFFFF]]
-    out = PixelFixPipeline(PipelineConfig(pixel_width=1, colors=2)).run_on_labels(labels, palette_override=[0x123456])
-    assert out == [[0x123456, 0x123456]]
+    result = PixelFixPipeline(PipelineConfig(pixel_width=1, colors=2)).run_on_labels_detailed(
+        labels,
+        palette_override=[0x123456],
+    )
+    assert result.labels == [[0x123456, 0x123456]]
+    assert result.structured_palette is not None
+    assert result.structured_palette.source_mode == "override"
+    assert result.ramp_count == 1
+    assert result.effective_palette_size == 1

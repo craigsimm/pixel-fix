@@ -8,6 +8,7 @@ Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: Pillow>=10.0
+Requires-Dist: numpy>=1.26
 Dynamic: license-file
 
 # pixel-fix

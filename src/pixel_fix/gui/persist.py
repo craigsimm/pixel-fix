@@ -15,7 +15,10 @@ PROCESS_LOG_FILE_NAME = "process.log"
 SETTING_LABELS = {
     "pixel_width": "Pixel size",
     "downsample_mode": "Resize method",
-    "colors": "Colors",
+    "generated_shades": "Generated shades",
+    "auto_detect_count": "Auto-detect count",
+    "contrast_bias": "Contrast bias",
+    "palette_dither_mode": "Palette dithering",
     "input_mode": "Input mode",
     "output_mode": "Output mode",
     "quantizer": "Quantizer",
@@ -51,7 +54,10 @@ def serialize_settings(settings: PreviewSettings) -> dict[str, Any]:
     return {
         "pixel_width": settings.pixel_width,
         "downsample_mode": settings.downsample_mode,
-        "colors": settings.colors,
+        "generated_shades": settings.generated_shades,
+        "auto_detect_count": settings.auto_detect_count,
+        "contrast_bias": settings.contrast_bias,
+        "palette_dither_mode": settings.palette_dither_mode,
         "input_mode": settings.input_mode,
         "output_mode": settings.output_mode,
         "quantizer": settings.quantizer,
@@ -65,7 +71,10 @@ def deserialize_settings(data: dict[str, Any] | None) -> PreviewSettings:
     return PreviewSettings(
         pixel_width=max(1, _as_int(data.get("pixel_width"), 2)),
         downsample_mode=str(data.get("downsample_mode", "nearest")),
-        colors=max(2, _as_int(data.get("colors"), 16)),
+        generated_shades=_coerce_generated_shades(data.get("generated_shades", data.get("ramp_length", 4))),
+        auto_detect_count=_coerce_auto_detect_count(data.get("auto_detect_count", 12)),
+        contrast_bias=max(0.0, min(2.0, _as_float(data.get("contrast_bias"), 1.0))),
+        palette_dither_mode=str(data.get("palette_dither_mode", data.get("dither_mode", "none"))),
         input_mode=str(data.get("input_mode", "rgba")),
         output_mode=str(data.get("output_mode", "rgba")),
         quantizer=str(data.get("quantizer", "topk")),
@@ -145,6 +154,25 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_generated_shades(value: Any) -> int:
+    parsed = _as_int(value, 4)
+    allowed = (2, 4, 6, 8, 10)
+    if parsed in allowed:
+        return parsed
+    return min(allowed, key=lambda candidate: abs(candidate - parsed))
+
+
+def _coerce_auto_detect_count(value: Any) -> int:
+    return max(1, min(12, _as_int(value, 12)))
 
 
 def _format_snapshot_value(key: str, value: Any) -> str:

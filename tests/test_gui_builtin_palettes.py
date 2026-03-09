@@ -59,6 +59,7 @@ def test_builtin_palette_menu_uses_catalog_tree(monkeypatch, tmp_path: Path) -> 
         assert builtins_menu.entrycget(0, "label") == "DawnBringer"
         folder_menu = builtins_menu.nametowidget(builtins_menu.entrycget(0, "menu"))
         assert folder_menu.entrycget(0, "label") == "DB16"
+        assert gui._menu_items["palette"].entrycget(5, "label") == "Save Current Palette..."
     finally:
         gui.root.destroy()
 

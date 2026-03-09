@@ -7,7 +7,10 @@ from dataclasses import dataclass, replace
 class PreviewSettings:
     pixel_width: int = 2
     downsample_mode: str = "nearest"
-    colors: int = 16
+    generated_shades: int = 4
+    auto_detect_count: int = 12
+    contrast_bias: float = 1.0
+    palette_dither_mode: str = "none"
     input_mode: str = "rgba"
     output_mode: str = "rgba"
     quantizer: str = "topk"
