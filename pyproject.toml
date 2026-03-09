@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "pixel-fix contributors" }]
-dependencies = ["Pillow>=10.0"]
+dependencies = ["Pillow>=10.0", "numpy>=1.26"]
 
 [project.scripts]
 pixel-fix = "pixel_fix.cli:main"

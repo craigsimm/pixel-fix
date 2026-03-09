@@ -9,10 +9,13 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
+from pixel_fix.palette.advanced import detect_key_colors_from_image, generate_structured_palette
 from pixel_fix.palette.color_modes import extract_unique_colors
 from pixel_fix.palette.io import load_palette, save_palette
 from pixel_fix.palette.catalog import PaletteCatalogEntry, discover_palette_catalog
-from pixel_fix.palette.quantize import generate_palette
+from pixel_fix.palette.model import StructuredPalette
+from pixel_fix.palette.quantize import generate_palette as generate_override_palette
+from pixel_fix.palette.workspace import ColorWorkspace
 from pixel_fix.pipeline import PipelineConfig
 from pixel_fix.resample import resize_labels, target_size_for_pixel_width
 
@@ -42,10 +45,17 @@ from .zoom import ZOOM_PRESETS, choose_fit_zoom, clamp_zoom, zoom_in, zoom_out
 
 OPEN_HAND_CURSOR = "hand2"
 CLOSED_HAND_CURSOR = "fleur"
+PRIMARY_BUTTON_INACTIVE_BG = "#111C42"
+PRIMARY_BUTTON_INACTIVE_FG = "#207BC8"
+PRIMARY_BUTTON_ACTIVE_BG = "#42BAF0"
+PRIMARY_BUTTON_ACTIVE_FG = "#FFFFFF"
+PRIMARY_BUTTON_HOVER_BG = "#7FD9F8"
+PRIMARY_BUTTON_HOVER_FG = "#FFFFFF"
 MAX_PALETTE_SWATCHES = 256
 PALETTE_SWATCH_SIZE = 18
 PALETTE_SWATCH_GAP = 4
 MAX_RECENT_FILES = 10
+MAX_KEY_COLORS = 24
 
 RESIZE_OPTIONS = (
     ("Nearest Neighbor", "nearest"),
@@ -53,14 +63,17 @@ RESIZE_OPTIONS = (
     ("RotSprite", "rotsprite"),
 )
 QUANTIZER_OPTIONS = (
-    ("Fast top colours (topk)", "topk"),
-    ("Clustered colours (k-means)", "kmeans"),
+    ("Median Cut", "median-cut"),
+    ("K-Means Clustering", "kmeans"),
 )
 DITHER_OPTIONS = (
     ("None", "none"),
-    ("Floyd-Steinberg", "floyd-steinberg"),
     ("Ordered (Bayer)", "ordered"),
+    ("Blue Noise", "blue-noise"),
 )
+GENERATED_SHADES_OPTIONS = (2, 4, 6, 8, 10)
+AUTO_DETECT_COUNT_OPTIONS = tuple(range(1, MAX_KEY_COLORS + 1))
+RAMP_CONTRAST_OPTIONS = tuple(range(10, 101, 10))
 COLOR_MODE_OPTIONS = (
     ("RGBA", "rgba"),
     ("Indexed", "indexed"),
@@ -114,9 +127,13 @@ class PixelFixGui:
         self._comparison_original_key: tuple[object, ...] | None = None
         self.prepared_input_cache = None
         self.prepared_input_cache_key: tuple[object, ...] | None = None
+        self.workspace = ColorWorkspace()
         self.active_palette: list[int] | None = None
         self.active_palette_source = ""
         self.active_palette_path: str | None = None
+        self.key_colors: list[int] = []
+        self.advanced_palette_preview: StructuredPalette | None = None
+        self.key_color_pick_mode = False
         self.builtin_palette_entries = discover_palette_catalog(self._resource_path("palettes"))
         self._builtin_palette_by_path = {str(entry.path): entry for entry in self.builtin_palette_entries}
         self.last_output_path = persisted.get("last_output_path")
@@ -142,15 +159,19 @@ class PixelFixGui:
             self.view_var.set("original")
         self.pixel_width_var = tk.IntVar()
         self.downsample_mode_var = tk.StringVar()
-        self.colors_var = tk.IntVar()
+        self.palette_reduction_colors_var = tk.IntVar()
+        self.generated_shades_var = tk.StringVar()
+        self.auto_detect_count_var = tk.StringVar()
+        self.contrast_bias_var = tk.DoubleVar()
+        self.palette_dither_var = tk.StringVar()
         self.input_mode_var = tk.StringVar()
         self.output_mode_var = tk.StringVar()
         self.quantizer_var = tk.StringVar()
         self.dither_var = tk.StringVar()
         self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
-        self.pixel_grid_var = tk.BooleanVar(value=bool(persisted.get("pixel_grid", False)))
         self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
         self.scale_info_var = tk.StringVar(value="Open an image to set the pixel size.")
+        self.key_colors_label_var = tk.StringVar(value="Key colours (0)")
         self.palette_info_var = tk.StringVar(value="Palette: none")
         self.image_info_var = tk.StringVar(value="No image  -  100%")
 
@@ -225,7 +246,7 @@ class PixelFixGui:
         palette_menu.add_separator()
         palette_menu.add_cascade(label="Built-in Palettes", menu=built_in_menu)
         palette_menu.add_command(label="Load Palette...", command=self.load_palette_file)
-        palette_menu.add_command(label="Save Palette...", command=self.save_palette_file)
+        palette_menu.add_command(label="Save Current Palette...", command=self.save_palette_file)
         palette_menu.add_command(label="Clear Active Palette", command=self.clear_active_palette)
         menubar.add_cascade(label="Palette", menu=palette_menu)
 
@@ -240,18 +261,31 @@ class PixelFixGui:
         resize_menu = tk.Menu(preferences_menu, tearoff=False)
         for label, _value in RESIZE_OPTIONS:
             resize_menu.add_radiobutton(label=label, value=label, variable=self.downsample_mode_var, command=self._on_settings_changed)
-        quantizer_menu = tk.Menu(preferences_menu, tearoff=False)
+        palette_reduction_menu = tk.Menu(preferences_menu, tearoff=False)
         for label, _value in QUANTIZER_OPTIONS:
-            quantizer_menu.add_radiobutton(label=label, value=label, variable=self.quantizer_var, command=self._on_settings_changed)
-        dither_menu = tk.Menu(preferences_menu, tearoff=False)
+            palette_reduction_menu.add_radiobutton(label=label, value=label, variable=self.quantizer_var, command=self._on_settings_changed)
+        colour_ramp_menu = tk.Menu(preferences_menu, tearoff=False)
+        auto_detect_menu = tk.Menu(colour_ramp_menu, tearoff=False)
+        for value in AUTO_DETECT_COUNT_OPTIONS:
+            auto_detect_menu.add_radiobutton(label=str(value), value=str(value), variable=self.auto_detect_count_var, command=self._on_settings_changed)
+        ramp_steps_menu = tk.Menu(colour_ramp_menu, tearoff=False)
+        for value in GENERATED_SHADES_OPTIONS:
+            ramp_steps_menu.add_radiobutton(label=str(value), value=str(value), variable=self.generated_shades_var, command=self._on_settings_changed)
+        ramp_contrast_menu = tk.Menu(colour_ramp_menu, tearoff=False)
+        for value in RAMP_CONTRAST_OPTIONS:
+            ramp_contrast_menu.add_radiobutton(label=f"{value}%", value=value / 100.0, variable=self.contrast_bias_var, command=self._on_settings_changed)
+        colour_ramp_menu.add_cascade(label="Auto Detect Count", menu=auto_detect_menu)
+        colour_ramp_menu.add_cascade(label="Ramp Steps", menu=ramp_steps_menu)
+        colour_ramp_menu.add_cascade(label="Ramp Contrast", menu=ramp_contrast_menu)
+        dithering_menu = tk.Menu(preferences_menu, tearoff=False)
         for label, _value in DITHER_OPTIONS:
-            dither_menu.add_radiobutton(label=label, value=label, variable=self.dither_var, command=self._on_settings_changed)
+            dithering_menu.add_radiobutton(label=label, value=label, variable=self.palette_dither_var, command=self._on_settings_changed)
         preferences_menu.add_checkbutton(label="Checkerboard background", variable=self.checkerboard_var, command=self._on_overlay_changed)
-        preferences_menu.add_checkbutton(label="Pixel grid overlay", variable=self.pixel_grid_var, command=self._on_overlay_changed)
         preferences_menu.add_separator()
         preferences_menu.add_cascade(label="Resize Method", menu=resize_menu)
-        preferences_menu.add_cascade(label="Palette Reduction", menu=quantizer_menu)
-        preferences_menu.add_cascade(label="Dithering", menu=dither_menu)
+        preferences_menu.add_cascade(label="Palette Reduction Method", menu=palette_reduction_menu)
+        preferences_menu.add_cascade(label="Colour Ramp", menu=colour_ramp_menu)
+        preferences_menu.add_cascade(label="Dithering Method", menu=dithering_menu)
         menubar.add_cascade(label="Preferences", menu=preferences_menu)
 
         self.root.config(menu=menubar)
@@ -264,8 +298,9 @@ class PixelFixGui:
         self._menu_items["built_in_palettes"] = built_in_menu
         self._menu_items["preferences"] = preferences_menu
         self._menu_items["preferences_resize"] = resize_menu
-        self._menu_items["preferences_quantizer"] = quantizer_menu
-        self._menu_items["preferences_dither"] = dither_menu
+        self._menu_items["preferences_palette_reduction"] = palette_reduction_menu
+        self._menu_items["preferences_colour_ramp"] = colour_ramp_menu
+        self._menu_items["preferences_dithering"] = dithering_menu
         self._populate_builtin_palette_menu()
         self._refresh_recent_menu()
 
@@ -286,16 +321,53 @@ class PixelFixGui:
         ttk.Label(scale_section, textvariable=self.scale_info_var, wraplength=300).pack(anchor=tk.W, pady=(6, 0))
 
         downsample_section = self._create_section(sidebar, "2. Downsample")
-        self.downsample_button = tk.Button(downsample_section, text="Downsample", command=self.downsample_current_image, bg="#2d7d46", fg="white", relief=tk.FLAT, padx=14, pady=4)
+        self.downsample_button = tk.Button(downsample_section, text="Downsample", command=self.downsample_current_image, relief=tk.FLAT, padx=14, pady=4)
         self.downsample_button.pack(anchor=tk.W, pady=(4, 0))
 
         palette_section = self._create_section(sidebar, "3. Apply palette")
+        ttk.Label(palette_section, textvariable=self.key_colors_label_var).pack(anchor=tk.W)
+        self.key_color_listbox = tk.Listbox(
+            palette_section,
+            height=8,
+            selectmode=tk.EXTENDED,
+            exportselection=False,
+            activestyle="dotbox",
+        )
+        self.key_color_listbox.pack(fill=tk.X, pady=(6, 0))
+        self.key_color_listbox.bind("<<ListboxSelect>>", lambda _event: self._refresh_action_states(), add="+")
+        button_row = ttk.Frame(palette_section)
+        button_row.pack(fill=tk.X, pady=(6, 0))
+        self.pick_seed_button = ttk.Button(button_row, text="Pick Colour", command=self._toggle_seed_pick_mode)
+        self.pick_seed_button.pack(side=tk.LEFT)
+        self.auto_detect_button = ttk.Button(button_row, text="Auto Detect Key Colours", command=self._auto_detect_key_colors)
+        self.auto_detect_button.pack(side=tk.LEFT, padx=(6, 0))
+        button_row = ttk.Frame(palette_section)
+        button_row.pack(fill=tk.X, pady=(6, 0))
+        self.remove_seed_button = ttk.Button(button_row, text="Remove Selected", command=self._remove_selected_seed)
+        self.remove_seed_button.pack(side=tk.LEFT)
+        self.clear_seeds_button = ttk.Button(button_row, text="Clear All", command=self._clear_advanced_seeds)
+        self.clear_seeds_button.pack(side=tk.LEFT, padx=(6, 0))
         row = ttk.Frame(palette_section)
-        row.pack(fill=tk.X)
-        ttk.Label(row, text="Target colours").pack(side=tk.LEFT)
-        self.colors_spinbox = ttk.Spinbox(row, from_=2, to=256, textvariable=self.colors_var, width=8, command=self._on_settings_changed)
-        self.colors_spinbox.pack(side=tk.RIGHT)
-        self.reduce_palette_button = tk.Button(palette_section, text="Apply Palette", command=self.reduce_palette_current_image, bg="#2d7d46", fg="white", relief=tk.FLAT, padx=14, pady=4)
+        row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(row, text="Palette Reduction").pack(side=tk.LEFT)
+        self.palette_reduction_spinbox = ttk.Spinbox(
+            row,
+            from_=1,
+            to=256,
+            textvariable=self.palette_reduction_colors_var,
+            width=8,
+            command=self._on_settings_changed,
+        )
+        self.palette_reduction_spinbox.pack(side=tk.RIGHT)
+        self.generate_ramps_button = ttk.Button(palette_section, text="Generate Ramps", command=self._regenerate_all_ramps)
+        self.generate_ramps_button.pack(anchor=tk.W, pady=(8, 0))
+        self.generate_override_palette_button = ttk.Button(
+            palette_section,
+            text="Generate Reduced Palette",
+            command=self.generate_palette_from_image,
+        )
+        self.generate_override_palette_button.pack(anchor=tk.W, pady=(8, 0))
+        self.reduce_palette_button = tk.Button(palette_section, text="Apply Palette", command=self.reduce_palette_current_image, relief=tk.FLAT, padx=14, pady=4)
         self.reduce_palette_button.pack(anchor=tk.W, pady=(8, 0))
 
         workspace = ttk.Frame(body)
@@ -334,17 +406,52 @@ class PixelFixGui:
         self.canvas.bind("<ButtonPress-3>", self._on_quick_compare_press)
         self.canvas.bind("<ButtonRelease-3>", self._on_quick_compare_release)
 
-        for widget in (self.pixel_width_spinbox, self.colors_spinbox):
-            widget.bind("<KeyRelease>", self._on_settings_changed, add="+")
-            widget.bind("<<Increment>>", self._on_settings_changed, add="+")
-            widget.bind("<<Decrement>>", self._on_settings_changed, add="+")
+        self.pixel_width_spinbox.bind("<KeyRelease>", self._on_settings_changed, add="+")
+        self.pixel_width_spinbox.bind("<<Increment>>", self._on_settings_changed, add="+")
+        self.pixel_width_spinbox.bind("<<Decrement>>", self._on_settings_changed, add="+")
+        self.palette_reduction_spinbox.bind("<KeyRelease>", self._on_settings_changed, add="+")
+        self.palette_reduction_spinbox.bind("<<Increment>>", self._on_settings_changed, add="+")
+        self.palette_reduction_spinbox.bind("<<Decrement>>", self._on_settings_changed, add="+")
 
+        self._configure_primary_button(self.downsample_button)
+        self._configure_primary_button(self.reduce_palette_button)
         self._bind_shortcuts()
 
     def _create_section(self, parent: ttk.Frame, title: str) -> ttk.LabelFrame:
         frame = ttk.LabelFrame(parent, text=title)
         frame.pack(fill=tk.X, pady=(0, 10))
         return frame
+
+    def _configure_primary_button(self, button: tk.Button) -> None:
+        button._pixel_fix_hovered = False  # type: ignore[attr-defined]
+        button.configure(
+            bd=0,
+            highlightthickness=0,
+            activebackground=PRIMARY_BUTTON_HOVER_BG,
+            activeforeground=PRIMARY_BUTTON_HOVER_FG,
+            disabledforeground=PRIMARY_BUTTON_INACTIVE_FG,
+        )
+        button.bind("<Enter>", lambda _event, target=button: self._set_primary_button_hover(target, True), add="+")
+        button.bind("<Leave>", lambda _event, target=button: self._set_primary_button_hover(target, False), add="+")
+        self._refresh_primary_button_style(button)
+
+    def _set_primary_button_hover(self, button: tk.Button, hovered: bool) -> None:
+        button._pixel_fix_hovered = hovered  # type: ignore[attr-defined]
+        self._refresh_primary_button_style(button)
+
+    def _refresh_primary_button_style(self, button: tk.Button) -> None:
+        hovered = bool(getattr(button, "_pixel_fix_hovered", False))
+        enabled = str(button.cget("state")) != str(tk.DISABLED)
+        if enabled and hovered:
+            bg = PRIMARY_BUTTON_HOVER_BG
+            fg = PRIMARY_BUTTON_HOVER_FG
+        elif enabled:
+            bg = PRIMARY_BUTTON_ACTIVE_BG
+            fg = PRIMARY_BUTTON_ACTIVE_FG
+        else:
+            bg = PRIMARY_BUTTON_INACTIVE_BG
+            fg = PRIMARY_BUTTON_INACTIVE_FG
+        button.configure(bg=bg, fg=fg)
 
     def _bind_shortcuts(self) -> None:
         self.root.bind("<Control-o>", lambda _event: self.open_image())
@@ -381,6 +488,9 @@ class PixelFixGui:
             self._comparison_original_key = None
             self.prepared_input_cache = None
             self.prepared_input_cache_key = None
+            self.key_colors = []
+            self.advanced_palette_preview = None
+            self.key_color_pick_mode = False
             self._clear_palette_undo_state()
             self._set_active_palette(preserved_palette, preserved_source, preserved_path)
             self.quick_compare_active = False
@@ -395,6 +505,7 @@ class PixelFixGui:
             self.root.update_idletasks()
             self.zoom_fit()
             self._update_scale_info()
+            self._update_key_color_list()
             self._update_palette_strip()
             self.redraw_canvas()
             self._refresh_action_states()
@@ -525,6 +636,201 @@ class PixelFixGui:
         if not self.active_palette:
             return
         self._apply_active_palette(None, "", None, message="Cleared the active palette.")
+        self._update_palette_strip()
+
+    def _palette_is_override_mode(self) -> bool:
+        return self.active_palette is not None
+
+    def _current_key_colors(self) -> list[int]:
+        return list(self.key_colors)
+
+    def _update_key_color_list(self) -> None:
+        if hasattr(self, "key_colors_label_var"):
+            self.key_colors_label_var.set(f"Key colours ({len(self.key_colors)})")
+        if not hasattr(self, "key_color_listbox"):
+            return
+        selected_indices = set(int(index) for index in self.key_color_listbox.curselection())
+        self.key_color_listbox.delete(0, tk.END)
+        for index, label in enumerate(self.key_colors):
+            entry = f"#{label:06X}"
+            self.key_color_listbox.insert(tk.END, entry)
+            try:
+                red = (label >> 16) & 0xFF
+                green = (label >> 8) & 0xFF
+                blue = label & 0xFF
+                luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+                self.key_color_listbox.itemconfig(index, bg=f"#{label:06x}", fg="#000000" if luminance >= 140 else "#ffffff")
+            except tk.TclError:
+                pass
+            if index in selected_indices:
+                self.key_color_listbox.selection_set(index)
+
+    def _build_advanced_palette_preview(
+        self,
+        *,
+        key_colors: list[int] | None = None,
+        message: str | None = None,
+    ) -> None:
+        if self._palette_is_override_mode():
+            return
+        selected = list(self.key_colors if key_colors is None else key_colors)
+        if not selected:
+            self.advanced_palette_preview = None
+            self._update_palette_strip()
+            self._refresh_action_states()
+            if message:
+                self.process_status_var.set(message)
+            return
+        settings = self._read_settings_from_controls(strict=False)
+        computation = generate_structured_palette(
+            [],
+            key_colors=selected,
+            generated_shades=settings.generated_shades,
+            contrast_bias=settings.contrast_bias,
+            workspace=self.workspace,
+            source_label="Generated",
+        )
+        self.advanced_palette_preview = computation.palette
+        self._update_palette_strip()
+        if message:
+            self.process_status_var.set(message)
+        self._refresh_action_states()
+
+    def _ensure_advanced_palette_preview(self, *, force_regenerate: bool) -> None:
+        del force_regenerate
+        self._update_palette_strip()
+        self._refresh_action_states()
+
+    def _clear_advanced_seeds(self) -> None:
+        if not self.key_colors:
+            return
+        self.key_colors = []
+        self.key_color_pick_mode = False
+        self.advanced_palette_preview = None
+        self._update_key_color_list()
+        self._mark_output_stale("Cleared all key colours. Pick colours, then click Generate Ramps.")
+        self._update_palette_strip()
+        self._refresh_action_states()
+
+    def _remove_selected_seed(self) -> None:
+        if not self.key_colors:
+            return
+        selected = [int(index) for index in self.key_color_listbox.curselection()]
+        if not selected:
+            self.process_status_var.set("Select one or more key colours to remove.")
+            return
+        for index in sorted(selected, reverse=True):
+            del self.key_colors[index]
+        self.advanced_palette_preview = None
+        self._update_key_color_list()
+        self._mark_output_stale("Key colours changed. Click Generate Ramps to rebuild the palette.")
+        self._update_palette_strip()
+        self._refresh_action_states()
+
+    def _toggle_seed_pick_mode(self) -> None:
+        if self.original_display_image is None or self._palette_is_override_mode():
+            return
+        self.key_color_pick_mode = not self.key_color_pick_mode
+        if self.key_color_pick_mode:
+            self._set_view("original")
+            self.process_status_var.set("Click the original preview to add a key colour.")
+        else:
+            self.process_status_var.set("Colour pick cancelled.")
+        self._refresh_action_states()
+
+    def _auto_detect_key_colors(self) -> None:
+        if self.original_display_image is None or self._palette_is_override_mode() or self.image_state == "processing":
+            return
+        self.key_color_pick_mode = False
+        requested_count = getattr(getattr(self, "session", None), "current", None)
+        requested_count = getattr(requested_count, "auto_detect_count", MAX_KEY_COLORS)
+
+        def progress_callback(_percent: int, message: str) -> None:
+            self.process_status_var.set(message)
+            self.root.update_idletasks()
+
+        try:
+            detected = detect_key_colors_from_image(
+                self.original_display_image,
+                max_colors=requested_count,
+                workspace=self.workspace,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.process_status_var.set(f"Auto-detect failed: {exc}")
+            self._refresh_action_states()
+            return
+
+        if not detected:
+            self.process_status_var.set("No visible colours were found for auto-detection.")
+            self._refresh_action_states()
+            return
+
+        self.key_colors = detected
+        self.advanced_palette_preview = None
+        if hasattr(self, "key_color_listbox"):
+            self.key_color_listbox.selection_clear(0, tk.END)
+        self._update_key_color_list()
+        self._mark_output_stale(f"Detected {len(detected)} key colours. Click Generate Ramps to rebuild the palette.")
+        self._update_palette_strip()
+        self._refresh_action_states()
+
+    def _regenerate_all_ramps(self) -> None:
+        if not self.key_colors:
+            self.process_status_var.set("Pick at least one key colour before generating ramps.")
+            return
+        self._build_advanced_palette_preview(
+            key_colors=self._current_key_colors(),
+            message=f"Generated ramps from {len(self.key_colors)} key colour{'s' if len(self.key_colors) != 1 else ''}. Click Apply Palette to use them.",
+        )
+        self._mark_output_stale()
+
+    def _regenerate_selected_ramp(self) -> None:
+        self._regenerate_all_ramps()
+
+    def _on_palette_settings_changed(self, _event: tk.Event | None = None) -> None:
+        self._on_settings_changed(_event)
+
+    def _displayed_structured_palette(self) -> StructuredPalette | None:
+        if self._palette_is_override_mode():
+            return None
+        if self.advanced_palette_preview is not None:
+            return self.advanced_palette_preview
+        current = self._current_output_result()
+        if current is not None:
+            return current.structured_palette
+        return None
+
+    def _sample_label_from_preview(self, canvas_x: int, canvas_y: int) -> int | None:
+        if self._display_context is None or self._get_effective_view() != "original":
+            return None
+        if not self._point_is_over_image(canvas_x, canvas_y):
+            return None
+        width = self._display_context.sample_image.width if self._display_context.sample_image is not None else 0
+        height = self._display_context.sample_image.height if self._display_context.sample_image is not None else 0
+        if width <= 0 or height <= 0:
+            return None
+        relative_x = (canvas_x - self._display_context.image_left) / max(1, self._display_context.display_width)
+        relative_y = (canvas_y - self._display_context.image_top) / max(1, self._display_context.display_height)
+        image_x = min(width - 1, max(0, int(relative_x * width)))
+        image_y = min(height - 1, max(0, int(relative_y * height)))
+        pixel = self._display_context.sample_image.getpixel((image_x, image_y))
+        red, green, blue = pixel[:3]
+        return (int(red) << 16) | (int(green) << 8) | int(blue)
+
+    def _add_key_color(self, label: int) -> None:
+        if label in self.key_colors:
+            self.process_status_var.set(f"#{label:06X} is already in the key-colour list.")
+            return
+        if len(self.key_colors) >= MAX_KEY_COLORS:
+            self.process_status_var.set(f"You can only pick up to {MAX_KEY_COLORS} key colours.")
+            return
+        self.key_colors.append(label)
+        self.advanced_palette_preview = None
+        self._update_key_color_list()
+        self._mark_output_stale(f"Added key colour #{label:06X}. Click Generate Ramps to rebuild the palette.")
+        self._update_palette_strip()
+        self._refresh_action_states()
 
     def extract_unique_palette(self) -> None:
         source_grid = self._palette_source_grid()
@@ -539,16 +845,39 @@ class PixelFixGui:
         )
 
     def generate_palette_from_image(self) -> None:
-        source_grid = self._palette_source_grid()
-        if source_grid is None:
+        try:
+            settings = self._read_settings_from_controls(strict=False)
+        except Exception:
+            settings = self.session.current
+        self.session.current = settings
+        self._generate_override_palette_from_settings(settings)
+
+    def _generate_override_palette_from_settings(self, settings: PreviewSettings) -> None:
+        if self.image_state == "processing":
             return
-        settings = self._read_settings_from_controls(strict=False)
-        palette = generate_palette(rgb_to_labels(source_grid), colors=settings.colors, method=settings.quantizer)
+        source_labels = self._override_palette_source_labels()
+        if source_labels is None:
+            self.process_status_var.set("Downsample the image before generating an override palette.")
+            return
+        palette_size = self._override_palette_target_size(source_labels, settings)
+        if palette_size <= 0:
+            self.process_status_var.set("No colours are available to build an override palette.")
+            return
+        method = settings.quantizer
+        label = QUANTIZER_VALUE_TO_DISPLAY.get(method, method)
+        try:
+            palette = generate_override_palette(source_labels, palette_size, method=method)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Failed to generate override palette", str(exc))
+            return
+        if not palette:
+            self.process_status_var.set("No colours were generated for the override palette.")
+            return
         self._apply_active_palette(
             palette,
-            "Generated",
+            f"Generated Override: {label}",
             None,
-            message=f"Generated a {len(palette)}-colour palette. Click Apply Palette to update the preview.",
+            message=f"Generated a {len(palette)}-colour override palette with {label}. Click Apply Palette to use it.",
         )
 
     def load_palette_file(self) -> None:
@@ -575,13 +904,14 @@ class PixelFixGui:
         )
 
     def save_palette_file(self) -> None:
-        if not self.active_palette:
+        palette, _source = self._get_display_palette()
+        if not palette:
             return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Palette JSON", "*.json")])
         if not path:
             return
         try:
-            save_palette(Path(path), self.active_palette)
+            save_palette(Path(path), palette)
             self.process_status_var.set(f"Saved palette to {Path(path).name}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Failed to save palette", str(exc))
@@ -595,7 +925,8 @@ class PixelFixGui:
             messagebox.showerror("Invalid settings", str(exc))
             return
         self.session.current = settings
-        snapshot = make_process_snapshot(settings, self.active_palette, self.active_palette_path, self.active_palette_source)
+        snapshot_palette, snapshot_source = self._get_display_palette()
+        snapshot = make_process_snapshot(settings, snapshot_palette, self.active_palette_path, snapshot_source)
         changes = diff_snapshots(self.last_successful_process_snapshot, snapshot)
         source_size = (len(self.original_grid[0]), len(self.original_grid)) if self.original_grid else (0, 0)
 
@@ -621,13 +952,17 @@ class PixelFixGui:
         if self.prepared_input_cache is None or self.source_path is None:
             self.process_status_var.set("Downsample the image before applying a palette.")
             return
+        if self.active_palette is None and self.advanced_palette_preview is None:
+            self.process_status_var.set("Pick key colours and click Generate Ramps before applying the palette.")
+            return
         try:
             settings = self._read_settings_from_controls(strict=True)
         except ValueError as exc:
             messagebox.showerror("Invalid settings", str(exc))
             return
         self.session.current = settings
-        snapshot = make_process_snapshot(settings, self.active_palette, self.active_palette_path, self.active_palette_source)
+        snapshot_palette, snapshot_source = self._get_display_palette()
+        snapshot = make_process_snapshot(settings, snapshot_palette, self.active_palette_path, snapshot_source)
         changes = diff_snapshots(self.last_successful_process_snapshot, snapshot)
         source_size = (len(self.original_grid[0]), len(self.original_grid)) if self.original_grid else (0, 0)
         self._capture_palette_undo_state()
@@ -643,7 +978,13 @@ class PixelFixGui:
 
         def worker() -> None:
             try:
-                result = reduce_palette_image(self.prepared_input_cache, config, palette_override=self.active_palette, progress_callback=progress_callback)
+                result = reduce_palette_image(
+                    self.prepared_input_cache,
+                    config,
+                    palette_override=self.active_palette,
+                    structured_palette=None if self.active_palette is not None else self.advanced_palette_preview,
+                    progress_callback=progress_callback,
+                )
                 self.root.after(0, lambda: self._handle_palette_success(result, snapshot, changes, source_size))
             except Exception as exc:  # noqa: BLE001
                 self.root.after(0, lambda: self._handle_stage_failure(str(exc), changes, source_size))
@@ -757,12 +1098,16 @@ class PixelFixGui:
     ) -> None:
         self.palette_result = result
         self.palette_display_image = grid_to_pil_image(result.grid).convert("RGBA")
+        if result.structured_palette is not None and result.structured_palette.source_mode == "advanced":
+            self.advanced_palette_preview = result.structured_palette
         self.image_state = "processed_current"
         self.last_successful_process_snapshot = snapshot
         self._set_view("processed")
         self.root.update_idletasks()
         self.zoom_fit()
-        self.process_status_var.set(f"Applied palette with {result.stats.color_count} colours in {result.stats.elapsed_seconds:.2f}s.")
+        self.process_status_var.set(
+            f"Applied {result.stats.palette_strategy} palette with {result.stats.color_count} colours across {max(result.stats.ramp_count, 1)} ramps in {result.stats.elapsed_seconds:.2f}s."
+        )
         append_process_log(
             source_path_value=str(self.source_path),
             source_size=source_size,
@@ -828,23 +1173,12 @@ class PixelFixGui:
         rendered = self._render_display_image(sample_image, display_width, display_height)
         self._image_ref = ImageTk.PhotoImage(rendered)
         self.canvas.create_image(image_left, image_top, image=self._image_ref, anchor=tk.NW)
-        self._draw_scale_overlay()
         self._update_image_info()
 
     def _render_display_image(self, sample_image: Image.Image, display_width: int, display_height: int) -> Image.Image:
         background = self._build_background(sample_image.size)
         composited = Image.alpha_composite(background, sample_image.convert("RGBA"))
-        rendered = composited.resize((display_width, display_height), Image.Resampling.NEAREST)
-        if self.pixel_grid_var.get() and self.zoom >= 400 and sample_image.width > 0 and sample_image.height > 0:
-            draw = ImageDraw.Draw(rendered)
-            cell_width = max(1, display_width // sample_image.width)
-            cell_height = max(1, display_height // sample_image.height)
-            if cell_width >= 4 and cell_height >= 4:
-                for x in range(0, display_width + 1, cell_width):
-                    draw.line((x, 0, x, display_height), fill=(0, 0, 0, 100))
-                for y in range(0, display_height + 1, cell_height):
-                    draw.line((0, y, display_width, y), fill=(0, 0, 0, 100))
-        return rendered
+        return composited.resize((display_width, display_height), Image.Resampling.NEAREST)
 
     def _build_background(self, size: tuple[int, int]) -> Image.Image:
         width, height = size
@@ -859,38 +1193,6 @@ class PixelFixGui:
                 if ((x // 8) + (y // 8)) % 2 == 0:
                     draw.rectangle((x, y, x + 7, y + 7), fill=(180, 180, 180, 255))
         return background
-
-    def _draw_scale_overlay(self) -> None:
-        if not self._scale_overlay_active() or self._display_context is None or self.original_display_image is None:
-            return
-        sample_image = self._display_context.sample_image
-        if sample_image is None:
-            return
-        width, height = sample_image.size
-        step = self._overlay_grid_step(sample_image)
-
-        for image_x in range(0, width + 1, step):
-            x = self._image_x_to_canvas(image_x, width)
-            self.canvas.create_line(x, self._display_context.image_top, x, self._display_context.image_top + self._display_context.display_height, fill="#4cc2ff", width=1)
-        for image_y in range(0, height + 1, step):
-            y = self._image_y_to_canvas(image_y, height)
-            self.canvas.create_line(self._display_context.image_left, y, self._display_context.image_left + self._display_context.display_width, y, fill="#4cc2ff", width=1)
-        self.canvas.create_text(
-            self._display_context.image_left + 8,
-            self._display_context.image_top + 8,
-            anchor=tk.NW,
-            fill="#d8f4ff",
-            font=("Segoe UI", 10, "bold"),
-            text=self.scale_info_var.get(),
-        )
-
-    def _scale_overlay_active(self) -> bool:
-        return self.original_display_image is not None and self._get_effective_view() == "original" and not self.quick_compare_active
-
-    def _overlay_grid_step(self, sample_image: Image.Image) -> int:
-        if sample_image is self.comparison_original_image:
-            return 1
-        return max(1, self.session.current.pixel_width)
 
     def _get_effective_view(self) -> str:
         if self.quick_compare_active and self.view_var.get() == "processed":
@@ -937,7 +1239,26 @@ class PixelFixGui:
             return self.downsample_result.grid
         return self.original_grid
 
+    def _override_palette_source_labels(self) -> list[list[int]] | None:
+        if self.prepared_input_cache is None:
+            return None
+        return self.prepared_input_cache.reduced_labels
+
+    def _override_palette_target_size(self, labels: list[list[int]], settings: PreviewSettings) -> int:
+        unique_count = len(extract_unique_colors(labels))
+        if unique_count <= 0:
+            return 0
+        target = settings.palette_reduction_colors
+        return max(1, min(target, unique_count))
+
     def _on_canvas_press(self, event: tk.Event) -> None:
+        if self.key_color_pick_mode:
+            sampled = self._sample_label_from_preview(event.x, event.y)
+            if sampled is not None:
+                self._add_key_color(sampled)
+                self.key_color_pick_mode = False
+                self._refresh_action_states()
+            return
         if not self._point_is_over_image(event.x, event.y):
             return
         self.dragging = True
@@ -963,6 +1284,8 @@ class PixelFixGui:
     def _on_canvas_motion(self, event: tk.Event) -> None:
         if self.dragging:
             self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
+        elif self.key_color_pick_mode:
+            self.canvas.configure(cursor="crosshair")
         else:
             self.canvas.configure(cursor=OPEN_HAND_CURSOR if self._point_is_over_image(event.x, event.y) else "")
 
@@ -983,7 +1306,22 @@ class PixelFixGui:
         self.redraw_canvas()
 
     def _cursor_for_pointer(self) -> str:
+        if self.key_color_pick_mode:
+            return "crosshair"
         return OPEN_HAND_CURSOR if self._point_is_over_image() else ""
+
+    def _palette_hit_test(self, x: int, y: int) -> tuple[int, int] | None:
+        del x, y
+        return None
+
+    def _on_palette_canvas_click(self, event: tk.Event) -> None:
+        del event
+
+    def _on_palette_canvas_double_click(self, event: tk.Event) -> None:
+        del event
+
+    def _on_palette_canvas_right_click(self, event: tk.Event) -> None:
+        del event
 
     def _point_is_over_image(self, x: int | None = None, y: int | None = None) -> bool:
         if self._display_context is None:
@@ -1058,7 +1396,11 @@ class PixelFixGui:
     def _get_display_palette(self) -> tuple[list[int], str]:
         if self.active_palette:
             return self.active_palette, self.active_palette_source or "active"
+        if self.advanced_palette_preview is not None:
+            return self.advanced_palette_preview.labels(), self.advanced_palette_preview.source_label or "generated"
         current = self._current_output_result()
+        if current is not None and current.structured_palette is not None:
+            return current.structured_palette.labels(), current.structured_palette.source_label or current.stats.stage
         if current is not None:
             return extract_unique_colors(rgb_to_labels(current.grid)), current.stats.stage
         return ([], "none")
@@ -1076,10 +1418,14 @@ class PixelFixGui:
         return PreviewSettings(
             pixel_width=pixel_width,
             downsample_mode=RESIZE_DISPLAY_TO_VALUE.get(self.downsample_mode_var.get(), "nearest"),
-            colors=max(2, int(self.colors_var.get())),
+            palette_reduction_colors=max(1, min(256, int(self.palette_reduction_colors_var.get() or 16))),
+            generated_shades=max(2, min(10, int(self.generated_shades_var.get() or 4))),
+            auto_detect_count=max(1, min(MAX_KEY_COLORS, int(self.auto_detect_count_var.get() or MAX_KEY_COLORS))),
+            contrast_bias=max(0.1, min(1.0, float(self.contrast_bias_var.get() or 1.0))),
+            palette_dither_mode=DITHER_DISPLAY_TO_VALUE.get(self.palette_dither_var.get(), "none"),
             input_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.input_mode_var.get(), "rgba"),
             output_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.output_mode_var.get(), "rgba"),
-            quantizer=QUANTIZER_DISPLAY_TO_VALUE.get(self.quantizer_var.get(), "topk"),
+            quantizer=QUANTIZER_DISPLAY_TO_VALUE.get(self.quantizer_var.get(), QUANTIZER_OPTIONS[0][1]),
             dither_mode=DITHER_DISPLAY_TO_VALUE.get(self.dither_var.get(), "none"),
         )
 
@@ -1088,7 +1434,11 @@ class PixelFixGui:
         try:
             self.pixel_width_var.set(settings.pixel_width)
             self.downsample_mode_var.set(RESIZE_VALUE_TO_DISPLAY.get(settings.downsample_mode, RESIZE_OPTIONS[0][0]))
-            self.colors_var.set(settings.colors)
+            self.palette_reduction_colors_var.set(settings.palette_reduction_colors)
+            self.generated_shades_var.set(str(settings.generated_shades))
+            self.auto_detect_count_var.set(str(settings.auto_detect_count))
+            self.contrast_bias_var.set(settings.contrast_bias)
+            self.palette_dither_var.set(DITHER_VALUE_TO_DISPLAY.get(settings.palette_dither_mode, DITHER_OPTIONS[0][0]))
             self.input_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.input_mode, COLOR_MODE_OPTIONS[0][0]))
             self.output_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.output_mode, COLOR_MODE_OPTIONS[0][0]))
             self.quantizer_var.set(QUANTIZER_VALUE_TO_DISPLAY.get(settings.quantizer, QUANTIZER_OPTIONS[0][0]))
@@ -1116,10 +1466,18 @@ class PixelFixGui:
             or previous.downsample_mode != updated.downsample_mode
             or previous.input_mode != updated.input_mode
         )
-        palette_changed = (
-            previous.colors != updated.colors
-            or previous.output_mode != updated.output_mode
+        ramp_generation_changed = (
+            previous.generated_shades != updated.generated_shades
+            or previous.contrast_bias != updated.contrast_bias
+        )
+        auto_detect_changed = previous.auto_detect_count != updated.auto_detect_count
+        palette_reduction_changed = (
+            previous.palette_reduction_colors != updated.palette_reduction_colors
             or previous.quantizer != updated.quantizer
+        )
+        palette_apply_changed = (
+            previous.palette_dither_mode != updated.palette_dither_mode
+            or previous.output_mode != updated.output_mode
             or previous.dither_mode != updated.dither_mode
         )
         if downsample_changed:
@@ -1127,11 +1485,27 @@ class PixelFixGui:
             self.prepared_input_cache = None
             self.prepared_input_cache_key = None
             message = message or "Pixel scale changed. Click Downsample to update the preview."
-        elif palette_changed:
+        elif ramp_generation_changed:
+            self._clear_palette_undo_state()
+            self.advanced_palette_preview = None
+            message = message or "Ramp settings changed. Click Generate Ramps to rebuild the palette."
+        elif auto_detect_changed:
+            self.process_status_var.set(f"Auto-detect count set to {updated.auto_detect_count}.")
+            self._schedule_state_persist()
+            self._refresh_action_states()
+            return
+        elif palette_reduction_changed:
+            self.process_status_var.set("Palette reduction settings changed. Click Generate Reduced Palette to rebuild the palette.")
+            self._schedule_state_persist()
+            self._refresh_action_states()
+            return
+        elif palette_apply_changed:
             self._clear_palette_undo_state()
             message = message or "Palette settings changed. Click Apply Palette to update the preview."
         self._mark_output_stale(message)
+        self._update_key_color_list()
         self._update_scale_info()
+        self._update_palette_strip()
         self.redraw_canvas()
         self._schedule_state_persist()
         self._refresh_action_states()
@@ -1150,7 +1524,12 @@ class PixelFixGui:
         return PipelineConfig(
             pixel_width=settings.pixel_width,
             downsample_mode=settings.downsample_mode,
-            colors=settings.colors,
+            colors=len(self.key_colors) * (settings.generated_shades + 1),
+            palette_strategy="override" if self._palette_is_override_mode() else "advanced",
+            key_colors=tuple(self._current_key_colors()),
+            generated_shades=settings.generated_shades,
+            contrast_bias=settings.contrast_bias,
+            palette_dither_mode=settings.palette_dither_mode,
             input_mode=settings.input_mode,
             output_mode=settings.output_mode,
             quantizer=settings.quantizer,
@@ -1166,33 +1545,49 @@ class PixelFixGui:
         has_image = self.original_grid is not None
         has_output = self._current_output_result() is not None
         has_downsample = self.prepared_input_cache is not None
+        has_generated_palette = self.advanced_palette_preview is not None
         can_save = self.image_state == "processed_current" and has_output
         has_active_palette = bool(self.active_palette)
         can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
+        advanced_editable = has_image and not busy and not self._palette_is_override_mode()
         for widget, enabled in (
             (self.downsample_button, has_image and not busy),
-            (self.reduce_palette_button, has_downsample and not busy),
+            (self.generate_ramps_button, advanced_editable and bool(self.key_colors)),
+            (self.generate_override_palette_button, has_downsample and not busy),
+            (self.reduce_palette_button, has_downsample and not busy and (has_active_palette or has_generated_palette)),
             (self.zoom_in_button, has_image and not busy),
             (self.zoom_out_button, has_image and not busy),
+            (self.pick_seed_button, advanced_editable),
+            (self.auto_detect_button, advanced_editable),
+            (self.remove_seed_button, advanced_editable and bool(self.key_color_listbox.curselection())),
+            (self.clear_seeds_button, advanced_editable and bool(self.key_colors)),
         ):
             widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        self.pick_seed_button.configure(text="Cancel Pick" if self.key_color_pick_mode else "Pick Colour")
         self.pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
-        self.colors_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        self.palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        self.key_color_listbox.configure(state=tk.NORMAL if advanced_editable else tk.DISABLED)
         self._menu_items["view"].entryconfigure("Processed", state=tk.NORMAL if has_output else tk.DISABLED)
         self._menu_items["file"].entryconfigure("Save", state=tk.NORMAL if can_save else tk.DISABLED)
         self._menu_items["file"].entryconfigure("Save As...", state=tk.NORMAL if can_save else tk.DISABLED)
         self._menu_items["edit"].entryconfigure("Undo", state=tk.NORMAL if can_undo and not busy else tk.DISABLED)
         self._menu_items["edit"].entryconfigure("Downsample", state=tk.NORMAL if has_image and not busy else tk.DISABLED)
-        self._menu_items["edit"].entryconfigure("Apply Palette", state=tk.NORMAL if has_downsample and not busy else tk.DISABLED)
+        self._menu_items["edit"].entryconfigure(
+            "Apply Palette",
+            state=tk.NORMAL if has_downsample and not busy and (has_active_palette or has_generated_palette) else tk.DISABLED,
+        )
         self._menu_items["palette"].entryconfigure("Input Mode", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Output Mode", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Built-in Palettes", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Load Palette...", state=tk.NORMAL if not busy else tk.DISABLED)
-        self._menu_items["palette"].entryconfigure("Save Palette...", state=tk.NORMAL if has_active_palette and not busy else tk.DISABLED)
+        self._menu_items["palette"].entryconfigure("Save Current Palette...", state=tk.NORMAL if bool(self._get_display_palette()[0]) and not busy else tk.DISABLED)
         self._menu_items["palette"].entryconfigure("Clear Active Palette", state=tk.NORMAL if has_active_palette and not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Resize Method", state=tk.NORMAL if not busy else tk.DISABLED)
-        self._menu_items["preferences"].entryconfigure("Palette Reduction", state=tk.NORMAL if not busy else tk.DISABLED)
-        self._menu_items["preferences"].entryconfigure("Dithering", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Palette Reduction Method", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Colour Ramp", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Dithering Method", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._refresh_primary_button_style(self.downsample_button)
+        self._refresh_primary_button_style(self.reduce_palette_button)
 
     def _image_x_to_canvas(self, value: int, image_width: int) -> int:
         if self._display_context is None:
@@ -1224,7 +1619,6 @@ class PixelFixGui:
                 "last_successful_process_snapshot": self.last_successful_process_snapshot,
                 "zoom": self.zoom,
                 "checkerboard": self.checkerboard_var.get(),
-                "pixel_grid": self.pixel_grid_var.get(),
                 "view_mode": self.view_var.get(),
                 "recent_files": self.recent_files,
             }

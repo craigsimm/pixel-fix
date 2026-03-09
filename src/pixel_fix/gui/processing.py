@@ -5,6 +5,7 @@ from time import perf_counter
 
 from PIL import Image
 
+from pixel_fix.palette.model import StructuredPalette
 from pixel_fix.palette.color_modes import extract_unique_colors
 from pixel_fix.pipeline import (
     PipelineConfig,
@@ -36,6 +37,13 @@ class ProcessStats:
     initial_color_count: int
     color_count: int
     elapsed_seconds: float
+    seed_count: int = 0
+    ramp_count: int = 0
+    palette_strategy: str = "advanced"
+    effective_palette_size: int = 0
+    histogram_size: int = 0
+    palette_generation_seconds: float = 0.0
+    mapping_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,7 @@ class ProcessResult:
     height: int
     stats: ProcessStats
     prepared_input: PipelinePreparedResult
+    structured_palette: StructuredPalette | None = None
 
 
 def grid_to_pil_image(grid: RGBGrid) -> Image.Image:
@@ -107,6 +116,7 @@ def reduce_palette_image(
     prepared_input: PipelinePreparedResult,
     config: PipelineConfig,
     palette_override: list[int] | None = None,
+    structured_palette: StructuredPalette | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> ProcessResult:
     started = perf_counter()
@@ -114,6 +124,7 @@ def reduce_palette_image(
     result = pipeline.run_prepared_labels(
         prepared_input,
         palette_override=palette_override,
+        structured_palette=structured_palette,
         progress_callback=progress_callback,
     )
     rgb_grid = labels_to_rgb(result.labels)
@@ -132,8 +143,16 @@ def reduce_palette_image(
             initial_color_count=prepared_input.initial_color_count,
             color_count=len(extract_unique_colors(result.labels)),
             elapsed_seconds=perf_counter() - started,
+            seed_count=result.seed_count,
+            ramp_count=result.ramp_count,
+            palette_strategy=result.structured_palette.source_mode if result.structured_palette is not None else config.palette_strategy,
+            effective_palette_size=result.effective_palette_size,
+            histogram_size=result.histogram_size,
+            palette_generation_seconds=result.palette_generation_seconds,
+            mapping_seconds=result.mapping_seconds,
         ),
         prepared_input=prepared_input,
+        structured_palette=result.structured_palette,
     )
 
 
@@ -141,6 +160,7 @@ def process_image(
     grid: RGBGrid,
     config: PipelineConfig,
     palette_override: list[int] | None = None,
+    structured_palette: StructuredPalette | None = None,
     progress_callback: PipelineProgressCallback | None = None,
     prepared_input: PipelinePreparedResult | None = None,
 ) -> ProcessResult:
@@ -155,6 +175,7 @@ def process_image(
         prepared,
         config,
         palette_override=palette_override,
+        structured_palette=structured_palette,
         progress_callback=progress_callback,
     )
 

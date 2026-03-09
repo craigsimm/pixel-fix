@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+from PIL import Image
+
 from pixel_fix.types import LabelGrid
 
 
@@ -21,6 +23,30 @@ def top_k_palette(labels: LabelGrid, colors: int) -> list[int]:
     flat = [value for row in labels for value in row]
     counts = Counter(flat)
     return [label for label, _ in counts.most_common(colors)]
+
+
+def median_cut_palette(labels: LabelGrid, colors: int) -> list[int]:
+    if colors <= 0:
+        raise ValueError("colors must be > 0")
+    height = len(labels)
+    width = len(labels[0]) if height else 0
+    if width == 0 or height == 0:
+        return []
+
+    image = Image.new("RGB", (width, height))
+    image.putdata([_channels(value) for row in labels for value in row])
+    quantized = image.quantize(colors=colors, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    palette_bytes = quantized.getpalette() or []
+    used_entries = quantized.getcolors() or []
+    ordered_indices = [index for _count, index in sorted(used_entries, reverse=True)]
+    palette: list[int] = []
+    for index in ordered_indices:
+        offset = index * 3
+        if offset + 2 >= len(palette_bytes):
+            continue
+        red, green, blue = palette_bytes[offset : offset + 3]
+        palette.append((int(red) << 16) | (int(green) << 8) | int(blue))
+    return palette[:colors]
 
 
 def kmeans_palette(labels: LabelGrid, colors: int, iterations: int = 6) -> list[int]:
@@ -68,6 +94,8 @@ def remap_to_palette(labels: LabelGrid, palette: list[int]) -> LabelGrid:
 def generate_palette(labels: LabelGrid, colors: int, method: str = "topk") -> list[int]:
     if method == "topk":
         return top_k_palette(labels, colors)
+    if method == "median-cut":
+        return median_cut_palette(labels, colors)
     if method == "kmeans":
         return kmeans_palette(labels, colors)
     raise ValueError(f"Unsupported quantizer: {method}")
