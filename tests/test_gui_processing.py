@@ -141,6 +141,7 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     )
     gui = PixelFixGui.__new__(PixelFixGui)
     gui.palette_result = reduced
+    gui.downsample_display_image = Image.new("RGBA", (reduced.width, reduced.height), (9, 8, 7, 255))
     gui.palette_display_image = Image.new("RGBA", (reduced.width, reduced.height), (1, 2, 3, 255))
     gui.image_state = "processed_current"
     gui.last_successful_process_snapshot = {"stage": "palette"}
@@ -148,6 +149,7 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     gui.active_palette_source = ""
     gui.active_palette_path = None
     gui.advanced_palette_preview = None
+    gui.transparent_colors = {0x112233}
     gui.session = SimpleNamespace(current=PreviewSettings())
     gui.quick_compare_active = True
     gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
@@ -160,6 +162,7 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     gui._clear_palette_undo_state = lambda: setattr(gui, "_palette_undo_state", None)
     gui._palette_undo_state = PaletteUndoState(
         palette_result=None,
+        downsample_display_image=None,
         palette_display_image=None,
         image_state="processed_stale",
         last_successful_process_snapshot={"stage": "downsample"},
@@ -167,14 +170,17 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
         active_palette_source="",
         active_palette_path=None,
         advanced_palette_preview=None,
+        transparent_colors=(),
         settings=PreviewSettings(),
     )
 
     assert PixelFixGui._undo_palette_application(gui) is True
     assert gui.palette_result is None
+    assert gui.downsample_display_image is None
     assert gui.palette_display_image is None
     assert gui.image_state == "processed_stale"
     assert gui.last_successful_process_snapshot == {"stage": "downsample"}
+    assert gui.transparent_colors == set()
     assert gui.quick_compare_active is False
     assert gui.process_status_var.value == "Reverted the last palette application."
     assert gui._palette_undo_state is None
@@ -603,6 +609,157 @@ def test_save_palette_file_uses_gpl_dialog(monkeypatch) -> None:
     assert gui.process_status_var.value == "Saved palette to saved-palette.gpl"
 
 
+def test_open_image_path_clears_palette_and_transparency_state(monkeypatch, tmp_path) -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.active_palette = [0x112233]
+    gui.active_palette_source = "Loaded"
+    gui.active_palette_path = "example.gpl"
+    gui.transparent_colors = {0x112233}
+    gui._palette_selection_indices = {0}
+    gui._displayed_palette = [0x112233]
+    gui.key_colors = [0x445566]
+    gui.advanced_palette_preview = object()
+    gui.key_color_pick_mode = True
+    gui.palette_add_pick_mode = True
+    gui.transparency_pick_mode = True
+    gui.downsample_result = object()
+    gui.palette_result = object()
+    gui.downsample_display_image = object()
+    gui.palette_display_image = object()
+    gui.comparison_original_image = object()
+    gui._comparison_original_key = ("old",)
+    gui.prepared_input_cache = object()
+    gui.prepared_input_cache_key = ("old",)
+    gui.quick_compare_active = True
+    gui.pan_x = 5
+    gui.pan_y = 7
+    gui.image_state = "processed_current"
+    gui.root = SimpleNamespace(update_idletasks=lambda: None)
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._record_recent_file = lambda _path: None
+    gui._set_view = lambda _value: None
+    gui.zoom_fit = lambda: None
+    gui._update_scale_info = lambda: None
+    gui._update_key_color_list = lambda: None
+    gui._update_palette_strip = lambda: None
+    gui.redraw_canvas = lambda: None
+    gui._refresh_action_states = lambda: None
+    gui._clear_palette_undo_state = lambda: None
+
+    monkeypatch.setattr(app_module, "load_png_grid", lambda _path: _sample_grid())
+    monkeypatch.setattr(app_module, "load_png_rgba_image", lambda _path: Image.new("RGBA", (4, 4), (1, 2, 3, 255)))
+
+    image_path = tmp_path / "sprite.png"
+    image_path.write_text("", encoding="utf-8")
+
+    PixelFixGui._open_image_path(gui, image_path)
+
+    assert gui.active_palette is None
+    assert gui.active_palette_source == ""
+    assert gui.active_palette_path is None
+    assert gui.transparent_colors == set()
+    assert gui.downsample_result is None
+    assert gui.palette_result is None
+    assert gui.key_colors == []
+    assert gui.key_color_pick_mode is False
+    assert gui.palette_add_pick_mode is False
+    assert gui.transparency_pick_mode is False
+    assert gui.image_state == "loaded_original"
+
+
+def test_persist_state_omits_palette_adjustment_values(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._persist_after_id = None
+    gui.session = SimpleNamespace(
+        current=PreviewSettings(
+            palette_brightness=15,
+            palette_contrast=140,
+            palette_hue=-20,
+            palette_saturation=160,
+        )
+    )
+    gui.last_output_path = "out.png"
+    gui.last_successful_process_snapshot = {"stage": "palette"}
+    gui.zoom = 125
+    gui.checkerboard_var = SimpleNamespace(get=lambda: True)
+    gui.view_var = SimpleNamespace(get=lambda: "processed")
+    gui.recent_files = ["example.png"]
+
+    monkeypatch.setattr(app_module, "save_app_state", lambda data: captured.update(data))
+
+    PixelFixGui._persist_state(gui)
+
+    settings = captured["settings"]
+    assert "palette_brightness" not in settings
+    assert "palette_contrast" not in settings
+    assert "palette_hue" not in settings
+    assert "palette_saturation" not in settings
+
+
+def test_add_colour_to_current_palette_materializes_display_palette() -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.process_status_var = SimpleNamespace(set=lambda value: captured.setdefault("status", value))
+    gui._get_display_palette = lambda: ([0x112233], "Generated")
+    gui._apply_palette_edit = lambda palette, message: captured.update({"palette": palette, "message": message})
+
+    added = PixelFixGui._add_colour_to_current_palette(gui, 0x445566)
+
+    assert added is True
+    assert captured["palette"] == [0x112233, 0x445566]
+    assert captured["message"] == "Added #445566 to the current palette. Click Apply Palette to update the preview."
+
+
+def test_remove_selected_palette_colours_uses_selected_swatches() -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.process_status_var = SimpleNamespace(set=lambda value: captured.setdefault("status", value))
+    gui._get_display_palette = lambda: ([0x111111, 0x222222, 0x333333], "Generated")
+    gui._apply_palette_edit = lambda palette, message: captured.update({"palette": palette, "message": message})
+    gui._palette_selection_indices = {0, 2}
+
+    PixelFixGui._remove_selected_palette_colors(gui)
+
+    assert captured["palette"] == [0x222222]
+    assert captured["message"] == "Removed 2 palette colours. Click Apply Palette to update the preview."
+
+
+def test_add_transparent_colour_updates_output_and_undo_restores() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.downsample_result = downsample_image(_sample_grid(), PipelineConfig(pixel_width=2))
+    gui.palette_result = None
+    gui.transparent_colors = set()
+    gui.downsample_display_image = None
+    gui.palette_display_image = None
+    gui.image_state = "processed_current"
+    gui.last_successful_process_snapshot = {"stage": "downsample"}
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.session = SimpleNamespace(current=PreviewSettings())
+    gui.quick_compare_active = False
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._update_palette_strip = lambda: None
+    gui._update_image_info = lambda: None
+    gui.redraw_canvas = lambda: None
+    gui._schedule_state_persist = lambda: None
+    gui._refresh_action_states = lambda: None
+    gui._sync_controls_from_settings = lambda _settings: None
+    PixelFixGui._refresh_output_display_images(gui)
+
+    changed = PixelFixGui._add_transparent_colour(gui, 0xFF0000)
+
+    assert changed is True
+    assert gui.downsample_display_image.getpixel((0, 0))[3] == 0
+    assert gui.process_status_var.value == "Made #FF0000 transparent. Press Undo to restore it."
+
+    assert PixelFixGui._undo_palette_application(gui) is True
+    assert gui.downsample_display_image.getpixel((0, 0))[3] == 255
+    assert gui.transparent_colors == set()
+
+
 def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> None:
     rectangles: list[tuple[object, ...]] = []
     palette_info = SimpleNamespace(value="", set=lambda value: setattr(palette_info, "value", value))
@@ -628,6 +785,7 @@ def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> 
     gui.palette_info_var = palette_info
     gui.active_palette = None
     gui.active_palette_source = ""
+    gui._palette_selection_indices = set()
     gui.advanced_palette_preview = generate_structured_palette(
         [],
         key_colors=[0x336699, 0xCC8844],
