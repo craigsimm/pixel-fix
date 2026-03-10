@@ -305,3 +305,24 @@ So for real use, the GUI is the recommended path right now.
 - [`src/pixel_fix/palette`](./src/pixel_fix/palette): palette generation, adjustment, quantization, loading/saving, perceptual colour math
 - [`src/pixel_fix/pipeline.py`](./src/pixel_fix/pipeline.py): staged pipeline integration
 - [`tests`](./tests): unit tests covering resampling, palette logic, GUI state, and pipeline behavior
+
+## E2E quality gates (synthetic sprite fixtures)
+
+The end-to-end pipeline tests include deterministic synthetic fixtures under `tests/fixtures/`.
+
+Thresholds currently used by the pass/fail gate:
+
+- Grid alignment (`tests/test_csea_e2e.py`):
+  - recovered scale error must be `0`
+  - recovered phase error must be within `±1` pixel on each axis
+  - per-cell purity score must be at least `0.82`
+- Outline continuity (`tests/test_csea_e2e.py`):
+  - largest connected outline component ratio must improve by at least `+0.12`
+- Palette cardinality exactness:
+  - output unique-color count must exactly match the override palette size
+- Flat-region variance reduction:
+  - Oklab variance in the synthetic flat fill region must be reduced to `<= 35%` of the noisy input variance
+- Perceptual delta guardrail:
+  - 95th percentile HyAB/Oklab distance between noisy input and processed output must remain `<= 0.50`
+
+For deterministic execution, tests explicitly set fixed RNG seeds before clustering-path coverage checks.
