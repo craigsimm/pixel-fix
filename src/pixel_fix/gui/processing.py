@@ -90,6 +90,118 @@ def apply_transparency_fill(result: ProcessResult, x: int, y: int) -> tuple[Proc
     return replace(result, alpha_mask=tuple(tuple(row) for row in next_mask)), changed
 
 
+def add_exterior_outline(result: ProcessResult, outline_label: int, *, transparent_labels: set[int] | None = None) -> tuple[ProcessResult, int]:
+    if result.width <= 0 or result.height <= 0:
+        return result, 0
+    visible = _effective_visible_mask(result, transparent_labels)
+    exterior = _exterior_transparent_mask(visible)
+    outline_rgb = ((outline_label >> 16) & 0xFF, (outline_label >> 8) & 0xFF, outline_label & 0xFF)
+    next_grid = [list(row) for row in result.grid]
+    next_mask = [row[:] for row in visible]
+    changed = 0
+    for y in range(result.height):
+        for x in range(result.width):
+            if visible[y][x] or not exterior[y][x]:
+                continue
+            if not _touches_visible_pixel(visible, x, y):
+                continue
+            next_grid[y][x] = outline_rgb
+            next_mask[y][x] = True
+            changed += 1
+    if changed == 0:
+        return result, 0
+    return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), changed
+
+
+def remove_exterior_outline(result: ProcessResult, *, transparent_labels: set[int] | None = None) -> tuple[ProcessResult, int]:
+    if result.width <= 0 or result.height <= 0:
+        return result, 0
+    visible = _effective_visible_mask(result, transparent_labels)
+    exterior = _exterior_transparent_mask(visible)
+    next_mask = [row[:] for row in visible]
+    changed = 0
+    for y in range(result.height):
+        for x in range(result.width):
+            if not visible[y][x]:
+                continue
+            if not _touches_exterior_space(exterior, x, y):
+                continue
+            next_mask[y][x] = False
+            changed += 1
+    if changed == 0:
+        return result, 0
+    return replace(result, alpha_mask=_normalize_alpha_mask(next_mask)), changed
+
+
+def _effective_visible_mask(result: ProcessResult, transparent_labels: set[int] | None = None) -> list[list[bool]]:
+    blocked = transparent_labels or set()
+    alpha_mask = result.alpha_mask
+    visible: list[list[bool]] = []
+    for y, row in enumerate(result.grid):
+        visible_row: list[bool] = []
+        for x, (red, green, blue) in enumerate(row):
+            label = (red << 16) | (green << 8) | blue
+            alpha_visible = True if alpha_mask is None else bool(alpha_mask[y][x])
+            visible_row.append(alpha_visible and label not in blocked)
+        visible.append(visible_row)
+    return visible
+
+
+def _exterior_transparent_mask(visible: list[list[bool]]) -> list[list[bool]]:
+    height = len(visible)
+    width = len(visible[0]) if height else 0
+    exterior = [[False] * width for _ in range(height)]
+    pending: list[tuple[int, int]] = []
+    for x in range(width):
+        pending.append((x, 0))
+        pending.append((x, height - 1))
+    for y in range(1, max(0, height - 1)):
+        pending.append((0, y))
+        pending.append((width - 1, y))
+    while pending:
+        x, y = pending.pop()
+        if x < 0 or y < 0 or x >= width or y >= height:
+            continue
+        if exterior[y][x] or visible[y][x]:
+            continue
+        exterior[y][x] = True
+        pending.append((x - 1, y))
+        pending.append((x + 1, y))
+        pending.append((x, y - 1))
+        pending.append((x, y + 1))
+    return exterior
+
+
+def _touches_visible_pixel(visible: list[list[bool]], x: int, y: int) -> bool:
+    height = len(visible)
+    width = len(visible[0]) if height else 0
+    for neighbor_y in range(max(0, y - 1), min(height, y + 2)):
+        for neighbor_x in range(max(0, x - 1), min(width, x + 2)):
+            if neighbor_x == x and neighbor_y == y:
+                continue
+            if visible[neighbor_y][neighbor_x]:
+                return True
+    return False
+
+
+def _touches_exterior_space(exterior: list[list[bool]], x: int, y: int) -> bool:
+    height = len(exterior)
+    width = len(exterior[0]) if height else 0
+    for neighbor_y in range(max(0, y - 1), min(height, y + 2)):
+        for neighbor_x in range(max(0, x - 1), min(width, x + 2)):
+            if neighbor_x == x and neighbor_y == y:
+                continue
+            if exterior[neighbor_y][neighbor_x]:
+                return True
+    return x == 0 or y == 0 or x == width - 1 or y == height - 1
+
+
+def _normalize_alpha_mask(mask: list[list[bool]]) -> tuple[tuple[bool, ...], ...] | None:
+    if all(all(value for value in row) for row in mask):
+        return None
+    return tuple(tuple(row) for row in mask)
+
+
 def grid_to_pil_image(grid: RGBGrid) -> Image.Image:
     height = len(grid)
     width = len(grid[0]) if height else 0

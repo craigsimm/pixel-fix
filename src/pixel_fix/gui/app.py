@@ -48,6 +48,7 @@ from .persist import (
 from .processing import (
     ProcessResult,
     RGBGrid,
+    add_exterior_outline,
     apply_transparency_fill,
     display_resize_method,
     downsample_image,
@@ -55,6 +56,7 @@ from .processing import (
     image_to_rgb_grid,
     labels_to_rgb,
     load_png_rgba_image,
+    remove_exterior_outline,
     reduce_palette_image,
     rgb_to_labels,
 )
@@ -472,6 +474,12 @@ class PixelFixGui:
         self.reduce_palette_button.pack(anchor=tk.W, pady=(8, 0))
         self.transparency_button = ttk.Button(palette_section, text="Make Transparent", command=self._toggle_transparency_pick_mode)
         self.transparency_button.pack(anchor=tk.W, pady=(8, 0))
+        outline_row = ttk.Frame(palette_section)
+        outline_row.pack(fill=tk.X, pady=(8, 0))
+        self.add_outline_button = ttk.Button(outline_row, text="Add Outline", command=self._add_outline_from_selection)
+        self.add_outline_button.pack(side=tk.LEFT)
+        self.remove_outline_button = ttk.Button(outline_row, text="Remove Outline", command=self._remove_outline)
+        self.remove_outline_button.pack(side=tk.LEFT, padx=(6, 0))
 
         adjust_section = self._create_section(sidebar, "4. Adjust palette")
         self.palette_adjustment_controls: list[tk.Scale] = []
@@ -1445,6 +1453,63 @@ class PixelFixGui:
         self.redraw_canvas()
         self._refresh_action_states()
         return True
+
+    def _selected_palette_outline_label(self) -> int | None:
+        displayed = getattr(self, "_displayed_palette", [])
+        selected = sorted(index for index in getattr(self, "_palette_selection_indices", set()) if 0 <= index < len(displayed))
+        if len(selected) != 1:
+            return None
+        return displayed[selected[0]]
+
+    def _set_current_output_result(self, result: ProcessResult) -> None:
+        if getattr(self, "palette_result", None) is not None:
+            self.palette_result = result
+        else:
+            self.downsample_result = result
+
+    def _add_outline_from_selection(self) -> None:
+        current = self._current_output_result()
+        if current is None or self.image_state == "processing":
+            return
+        outline_label = self._selected_palette_outline_label()
+        if outline_label is None:
+            self.process_status_var.set("Select exactly one palette colour to add an outline.")
+            return
+        updated, changed = add_exterior_outline(current, outline_label, transparent_labels=getattr(self, "transparent_colors", set()))
+        if changed <= 0:
+            self.process_status_var.set("No exterior outline pixels were available to add.")
+            return
+        self._capture_palette_undo_state()
+        self.transparent_colors = set()
+        self._set_current_output_result(updated)
+        self._refresh_output_display_images()
+        self._set_view("processed")
+        self.process_status_var.set(
+            f"Added outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
+        )
+        self._update_palette_strip()
+        self._update_image_info()
+        self.redraw_canvas()
+        self._refresh_action_states()
+
+    def _remove_outline(self) -> None:
+        current = self._current_output_result()
+        if current is None or self.image_state == "processing":
+            return
+        updated, changed = remove_exterior_outline(current, transparent_labels=getattr(self, "transparent_colors", set()))
+        if changed <= 0:
+            self.process_status_var.set("No exterior outline pixels were found to remove.")
+            return
+        self._capture_palette_undo_state()
+        self.transparent_colors = set()
+        self._set_current_output_result(updated)
+        self._refresh_output_display_images()
+        self._set_view("processed")
+        self.process_status_var.set(f"Removed {changed} outline pixel{'s' if changed != 1 else ''}. Press Undo to restore it.")
+        self._update_palette_strip()
+        self._update_image_info()
+        self.redraw_canvas()
+        self._refresh_action_states()
 
     def extract_unique_palette(self) -> None:
         source_grid = self._palette_source_grid()
@@ -2449,6 +2514,10 @@ class PixelFixGui:
         has_palette_source = self._has_palette_source()
         can_save = self.image_state == "processed_current" and has_output
         has_palette_selection = bool(self._palette_selection_indices)
+        valid_palette_selection = [
+            index for index in getattr(self, "_palette_selection_indices", set()) if 0 <= index < len(getattr(self, "_displayed_palette", []))
+        ]
+        has_single_palette_selection = len(valid_palette_selection) == 1
         can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
         advanced_editable = has_image and not busy and not self._palette_is_override_mode()
         for widget, enabled in (
@@ -2457,6 +2526,8 @@ class PixelFixGui:
             (self.generate_override_palette_button, has_downsample and not busy),
             (self.reduce_palette_button, has_downsample and not busy and has_palette_source),
             (self.transparency_button, has_output and not busy),
+            (self.add_outline_button, has_output and not busy and has_single_palette_selection),
+            (self.remove_outline_button, has_output and not busy),
             (self.zoom_in_button, has_image and not busy),
             (self.zoom_out_button, has_image and not busy),
             (self.pick_seed_button, advanced_editable),
