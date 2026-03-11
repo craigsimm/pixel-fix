@@ -10,6 +10,24 @@ from pixel_fix.palette.dither import apply_dither
 from pixel_fix.palette.io import load_palette, save_palette
 from pixel_fix.palette.quantize import generate_palette, remap_to_palette
 from pixel_fix.palette.replace import replace_batch, replace_exact, replace_tolerance
+from pixel_fix.palette.sort import (
+    PALETTE_SELECT_CHROMA_HIGH,
+    PALETTE_SELECT_CHROMA_LOW,
+    PALETTE_SELECT_HUE_BLUE,
+    PALETTE_SELECT_LIGHTNESS_DARK,
+    PALETTE_SELECT_LIGHTNESS_LIGHT,
+    PALETTE_SELECT_SATURATION_HIGH,
+    PALETTE_SELECT_SATURATION_LOW,
+    PALETTE_SELECT_TEMPERATURE_COOL,
+    PALETTE_SELECT_TEMPERATURE_WARM,
+    PALETTE_SORT_CHROMA,
+    PALETTE_SORT_HUE,
+    PALETTE_SORT_LIGHTNESS,
+    PALETTE_SORT_SATURATION,
+    PALETTE_SORT_TEMPERATURE,
+    select_palette_indices,
+    sort_palette_labels,
+)
 from pixel_fix.palette.workspace import ColorWorkspace, hyab_distance
 
 
@@ -35,6 +53,111 @@ def test_palette_io_roundtrip(tmp_path: Path) -> None:
     assert text.startswith("GIMP Palette")
     loaded = load_palette(path)
     assert loaded == [0x112233, 0xABCDEF]
+
+
+def test_sort_palette_by_lightness_orders_dark_to_light() -> None:
+    workspace = ColorWorkspace()
+    labels = [0xEEEEEE, 0x222222, 0x888888]
+
+    sorted_labels = sort_palette_labels(labels, PALETTE_SORT_LIGHTNESS, workspace)
+
+    assert sorted_labels == [0x222222, 0x888888, 0xEEEEEE]
+
+
+def test_sort_palette_by_hue_groups_neutrals_then_orders_hues() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x00FF00, 0x777777, 0xFF0000, 0x0000FF]
+
+    sorted_labels = sort_palette_labels(labels, PALETTE_SORT_HUE, workspace)
+
+    assert sorted_labels[0] == 0x777777
+    assert sorted_labels[1:] == [0xFF0000, 0x00FF00, 0x0000FF]
+
+
+def test_sort_palette_by_saturation_places_greys_first() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x666666, 0xAA8844, 0xFF0000]
+
+    sorted_labels = sort_palette_labels(labels, PALETTE_SORT_SATURATION, workspace)
+
+    assert sorted_labels[0] == 0x666666
+    assert sorted_labels[-1] == 0xFF0000
+
+
+def test_sort_palette_by_chroma_uses_oklab_chroma() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x777777, 0x7A7876, 0xFF0000]
+
+    sorted_labels = sort_palette_labels(labels, PALETTE_SORT_CHROMA, workspace)
+
+    assert sorted_labels[0] == 0x777777
+    assert sorted_labels[-1] == 0xFF0000
+
+
+def test_sort_palette_by_temperature_orders_cool_before_warm() -> None:
+    workspace = ColorWorkspace()
+    labels = [0xFFAA00, 0x0088FF, 0x999999, 0xFF2200]
+
+    sorted_labels = sort_palette_labels(labels, PALETTE_SORT_TEMPERATURE, workspace)
+
+    assert sorted_labels[0] == 0x999999
+    assert sorted_labels[1] == 0x0088FF
+    assert sorted_labels[-1] in {0xFFAA00, 0xFF2200}
+
+
+def test_sort_palette_preserves_input_order_for_equal_keys() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x112233, 0x112233, 0x445566]
+
+    sorted_labels = sort_palette_labels(labels, PALETTE_SORT_LIGHTNESS, workspace)
+
+    assert sorted_labels[:2] == [0x112233, 0x112233]
+
+
+def test_select_palette_by_lightness_uses_threshold_and_preserves_original_order() -> None:
+    workspace = ColorWorkspace()
+    labels = [0xEEEEEE, 0x222222, 0x888888, 0x444444]
+
+    dark_indices = select_palette_indices(labels, PALETTE_SELECT_LIGHTNESS_DARK, 30, workspace)
+    light_indices = select_palette_indices(labels, PALETTE_SELECT_LIGHTNESS_LIGHT, 30, workspace)
+
+    assert dark_indices == [1, 3]
+    assert light_indices == [0, 2]
+
+
+def test_select_palette_by_saturation_and_chroma_targets_expected_indices() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x666666, 0x889977, 0xFF0000, 0x7A7876]
+
+    low_saturation = select_palette_indices(labels, PALETTE_SELECT_SATURATION_LOW, 50, workspace)
+    high_saturation = select_palette_indices(labels, PALETTE_SELECT_SATURATION_HIGH, 50, workspace)
+    low_chroma = select_palette_indices(labels, PALETTE_SELECT_CHROMA_LOW, 50, workspace)
+    high_chroma = select_palette_indices(labels, PALETTE_SELECT_CHROMA_HIGH, 50, workspace)
+
+    assert low_saturation == [0, 3]
+    assert high_saturation == [1, 2]
+    assert low_chroma == [0, 3]
+    assert high_chroma == [1, 2]
+
+
+def test_select_palette_by_temperature_prefers_chromatic_colours() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x999999, 0x0088FF, 0xFFAA00, 0xFF2200]
+
+    cool_indices = select_palette_indices(labels, PALETTE_SELECT_TEMPERATURE_COOL, 50, workspace)
+    warm_indices = select_palette_indices(labels, PALETTE_SELECT_TEMPERATURE_WARM, 50, workspace)
+
+    assert cool_indices == [1, 3]
+    assert warm_indices == [2, 3]
+
+
+def test_select_palette_by_hue_bucket_excludes_neutrals_and_caps_at_eligible_count() -> None:
+    workspace = ColorWorkspace()
+    labels = [0x777777, 0x3366FF, 0x00FFFF]
+
+    blue_indices = select_palette_indices(labels, PALETTE_SELECT_HUE_BLUE, 100, workspace)
+
+    assert blue_indices == [1, 2]
 
 
 def test_json_palette_load_remains_supported(tmp_path: Path) -> None:
@@ -169,6 +292,20 @@ def test_adjust_palette_labels_changes_palette_in_oklab_space() -> None:
     assert all(isinstance(value, int) and 0 <= value <= 0xFFFFFF for value in adjusted)
 
 
+def test_adjust_palette_labels_only_changes_selected_indices() -> None:
+    labels = [0x336699, 0x88AACC, 0xCC8844]
+
+    adjusted = adjust_palette_labels(
+        labels,
+        PaletteAdjustments(brightness=15, contrast=130, hue=20, saturation=140),
+        selected_indices={1},
+    )
+
+    assert adjusted[0] == labels[0]
+    assert adjusted[1] != labels[1]
+    assert adjusted[2] == labels[2]
+
+
 def test_adjust_structured_palette_preserves_ramp_structure() -> None:
     palette = generate_structured_palette(
         [],
@@ -185,6 +322,26 @@ def test_adjust_structured_palette_preserves_ramp_structure() -> None:
     for ramp in adjusted.ramps:
         seed_color = next(color for color in ramp.colors if color.is_seed)
         assert ramp.seed_label == seed_color.label
+
+
+def test_adjust_structured_palette_only_changes_selected_indices() -> None:
+    palette = generate_structured_palette(
+        [],
+        key_colors=[0x336699, 0xCC8844],
+        generated_shades=2,
+    ).palette
+
+    adjusted = adjust_structured_palette(
+        palette,
+        PaletteAdjustments(brightness=10, contrast=120, saturation=130),
+        selected_indices={1},
+    )
+
+    original_labels = palette.labels()
+    adjusted_labels = adjusted.labels()
+    assert adjusted_labels[0] == original_labels[0]
+    assert adjusted_labels[1] != original_labels[1]
+    assert adjusted_labels[2:] == original_labels[2:]
 
 
 def test_detect_key_colors_ignores_transparent_pixels() -> None:

@@ -15,11 +15,6 @@ PROCESS_LOG_FILE_NAME = "process.log"
 SETTING_LABELS = {
     "pixel_width": "Pixel size",
     "downsample_mode": "Resize method",
-    "orphan_cleanup_enabled": "Stray pixel cleanup",
-    "orphan_min_similar_neighbors": "Stray pixel neighbour threshold",
-    "orphan_fill_gaps": "Fill 1px gaps",
-    "anti_alias_removal_enabled": "Anti-aliased edge cleanup",
-    "anti_alias_alpha_threshold": "Edge alpha cutoff",
     "palette_reduction_colors": "Palette reduction colours",
     "generated_shades": "Ramp steps",
     "auto_detect_count": "Auto-detect count",
@@ -64,11 +59,6 @@ def serialize_settings(settings: PreviewSettings) -> dict[str, Any]:
     return {
         "pixel_width": settings.pixel_width,
         "downsample_mode": settings.downsample_mode,
-        "orphan_cleanup_enabled": settings.orphan_cleanup_enabled,
-        "orphan_min_similar_neighbors": settings.orphan_min_similar_neighbors,
-        "orphan_fill_gaps": settings.orphan_fill_gaps,
-        "anti_alias_removal_enabled": settings.anti_alias_removal_enabled,
-        "anti_alias_alpha_threshold": settings.anti_alias_alpha_threshold,
         "palette_reduction_colors": settings.palette_reduction_colors,
         "generated_shades": settings.generated_shades,
         "auto_detect_count": settings.auto_detect_count,
@@ -91,11 +81,6 @@ def deserialize_settings(data: dict[str, Any] | None) -> PreviewSettings:
     return PreviewSettings(
         pixel_width=max(1, _as_int(data.get("pixel_width"), 2)),
         downsample_mode=str(data.get("downsample_mode", "nearest")),
-        orphan_cleanup_enabled=_as_bool(data.get("orphan_cleanup_enabled"), False),
-        orphan_min_similar_neighbors=_coerce_orphan_min_similar_neighbors(data.get("orphan_min_similar_neighbors", 1)),
-        orphan_fill_gaps=_as_bool(data.get("orphan_fill_gaps"), True),
-        anti_alias_removal_enabled=_as_bool(data.get("anti_alias_removal_enabled"), False),
-        anti_alias_alpha_threshold=_coerce_anti_alias_alpha_threshold(data.get("anti_alias_alpha_threshold", 224)),
         palette_reduction_colors=_coerce_palette_reduction_colors(data.get("palette_reduction_colors", 16)),
         generated_shades=_coerce_generated_shades(data.get("generated_shades", data.get("ramp_length", 4))),
         auto_detect_count=_coerce_auto_detect_count(data.get("auto_detect_count", 12)),
@@ -223,14 +208,6 @@ def _coerce_palette_reduction_colors(value: Any) -> int:
     return max(1, min(256, _as_int(value, 16)))
 
 
-def _coerce_orphan_min_similar_neighbors(value: Any) -> int:
-    return max(1, min(8, _as_int(value, 1)))
-
-
-def _coerce_anti_alias_alpha_threshold(value: Any) -> int:
-    return max(1, min(255, _as_int(value, 224)))
-
-
 def _coerce_ramp_contrast(value: Any) -> float:
     parsed = _as_float(value, 1.0)
     allowed = tuple(index / 10.0 for index in range(1, 11))
@@ -260,6 +237,12 @@ def _coerce_palette_reduction_method(value: Any) -> str:
     if parsed in {"median-cut", "kmeans"}:
         return parsed
     return "median-cut"
+
+
+def coerce_selection_threshold(value: Any) -> int:
+    parsed = _as_int(value, 30)
+    allowed = tuple(range(10, 101, 10))
+    return min(allowed, key=lambda candidate: abs(candidate - parsed))
 
 
 def _format_snapshot_value(key: str, value: Any) -> str:

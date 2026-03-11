@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from pixel_fix.gui.app import PixelFixGui
+from pixel_fix.palette.sort import PALETTE_SORT_LIGHTNESS
 
 
 def _write_gpl(path: Path, *entries: tuple[int, int, int, str]) -> None:
@@ -66,8 +67,22 @@ def test_builtin_palette_menu_uses_catalog_tree(monkeypatch, tmp_path: Path) -> 
         ]
         assert "Generate Override Palette" not in palette_labels
         assert "Add Colour" in palette_labels
+        assert "Sort Current Palette" in palette_labels
+        assert gui._menu_items["palette"].entrycget("Sort Current Palette", "state") == "disabled"
         assert "Clear Active Palette" not in palette_labels
         assert "Save Current Palette..." in palette_labels
+        sort_menu = gui._menu_items["palette_sort"]
+        sort_labels = [
+            sort_menu.entrycget(index, "label")
+            for index in range(sort_menu.index("end") + 1)
+            if sort_menu.type(index) != "separator"
+        ]
+        assert "Lightness (Dark -> Light)" in sort_labels
+        assert "Hue (Red Wheel)" in sort_labels
+        assert "Saturation (Low -> High)" in sort_labels
+        assert "Chroma (Low -> High)" in sort_labels
+        assert "Temperature (Cool -> Warm)" in sort_labels
+        assert "Reset To Source Order" not in sort_labels
         preference_labels = [
             gui._menu_items["preferences"].entrycget(index, "label")
             for index in range(gui._menu_items["preferences"].index("end") + 1)
@@ -88,8 +103,32 @@ def test_selecting_builtin_palette_updates_preview_without_processing(monkeypatc
         assert gui.active_palette == [0x112233, 0xABCDEF]
         assert gui.active_palette_path == str(entry.path)
         assert gui.palette_info_var.get() == "Palette: Built-in: DawnBringer / DB16 (2 colours)"
+        assert gui._menu_items["palette"].entrycget("Sort Current Palette", "state") == "normal"
         assert gui.downsample_result is None
         assert gui.palette_result is None
+    finally:
+        gui.root.destroy()
+
+
+def test_sorting_builtin_palette_does_not_mutate_catalog_entry(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        entry = gui.builtin_palette_entries[0]
+        original_colors = list(entry.colors)
+
+        gui._select_builtin_palette(entry)
+        gui.sort_current_palette(PALETTE_SORT_LIGHTNESS)
+
+        assert list(entry.colors) == original_colors
+        assert gui.active_palette is not None
+        assert gui.active_palette_source == "Sorted: Lightness (Dark -> Light)"
+        sort_menu = gui._menu_items["palette_sort"]
+        sort_labels = [
+            sort_menu.entrycget(index, "label")
+            for index in range(sort_menu.index("end") + 1)
+            if sort_menu.type(index) != "separator"
+        ]
+        assert "Reset To Source Order" in sort_labels
     finally:
         gui.root.destroy()
 

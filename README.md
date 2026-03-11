@@ -40,7 +40,6 @@ From one interface, you can:
   - `Nearest Neighbor`
   - `Bilinear Interpolation`
   - `RotSprite`
-  - optional stray-pixel cleanup and anti-aliased edge cleanup
 - Build palettes in several ways:
   - pick up to 24 key colours manually from the original image
   - auto-detect key colours from the original image
@@ -64,16 +63,15 @@ From one interface, you can:
 
 1. Open an image.
 2. Set the pixel size in `1. Determine pixel scale`.
-3. Optionally enable stray-pixel cleanup or anti-aliased edge cleanup in `2. Downsample`.
-4. Click `Downsample`.
-5. Choose how to build the palette:
+3. Click `Downsample`.
+4. Choose how to build the palette:
    - manual key colours + `Generate Ramps`
    - `Auto Detect Key Colours` + `Generate Ramps`
    - `Generate Reduced Palette`
    - built-in or loaded palette
-6. Optionally tweak the current palette in `4. Adjust palette`.
-7. Click `Apply Palette`.
-8. Compare the result against the original, then save the image or save the palette.
+5. Optionally tweak the current palette in `4. Adjust palette`.
+6. Click `Apply Palette`.
+7. Compare the result against the original, then save the image or save the palette.
 
 The important design rule is:
 
@@ -106,16 +104,6 @@ Downsampling is handled in [`src/pixel_fix/resample.py`](./src/pixel_fix/resampl
   - This can preserve some sprite-like edge character better than plain bilinear.
 
 The output of this stage is the reduced working image that all later palette work operates on.
-
-The downsample stage can also apply two optional cleanup passes before palette work:
-
-- `Remove anti-aliased edges`
-  - scans semi-transparent source pixels before reduction
-  - snaps edge pixels back to the nearest solid neighbour colour on strong edges
-- `Remove stray pixels`
-  - scans the reduced grid with 8-way neighbourhood checks
-  - replaces isolated colours that do not have enough similar neighbours
-  - can optionally fill 1px gaps inside larger shapes
 
 ### 3. Build or select a palette
 
