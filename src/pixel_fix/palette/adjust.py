@@ -30,13 +30,27 @@ def adjust_palette_labels(
     adjustments: PaletteAdjustments,
     *,
     workspace: ColorWorkspace | None = None,
+    selected_indices: set[int] | None = None,
 ) -> list[int]:
     if not labels:
         return []
     workspace = workspace or ColorWorkspace()
-    oklab = workspace.labels_to_oklab(np.asarray(labels, dtype=np.int64))
-    adjusted_labels, _adjusted_oklab = _adjust_oklab_labels(oklab, adjustments, workspace)
-    return adjusted_labels
+    if selected_indices is None:
+        oklab = workspace.labels_to_oklab(np.asarray(labels, dtype=np.int64))
+        adjusted_labels, _adjusted_oklab = _adjust_oklab_labels(oklab, adjustments, workspace)
+        return adjusted_labels
+
+    valid_indices = sorted(index for index in selected_indices if 0 <= index < len(labels))
+    if not valid_indices:
+        return list(labels)
+
+    selected_labels = [labels[index] for index in valid_indices]
+    oklab = workspace.labels_to_oklab(np.asarray(selected_labels, dtype=np.int64))
+    adjusted_labels, _adjusted_oklab = _adjust_oklab_labels(oklab, adjustments, workspace, source_labels=selected_labels)
+    output = list(labels)
+    for index, label in zip(valid_indices, adjusted_labels, strict=False):
+        output[index] = label
+    return output
 
 
 def adjust_structured_palette(
@@ -44,6 +58,7 @@ def adjust_structured_palette(
     adjustments: PaletteAdjustments,
     *,
     workspace: ColorWorkspace | None = None,
+    selected_indices: set[int] | None = None,
 ) -> StructuredPalette:
     workspace = workspace or ColorWorkspace()
     adjusted = clone_structured_palette(palette) or StructuredPalette()
@@ -51,13 +66,20 @@ def adjust_structured_palette(
     if not colors:
         return adjusted
 
-    labels = [color.label for color in colors]
-    oklab = np.asarray([color.oklab for color in colors], dtype=np.float64)
+    if selected_indices is None:
+        selected = list(range(len(colors)))
+    else:
+        selected = [index for index in sorted(selected_indices) if 0 <= index < len(colors)]
+        if not selected:
+            return adjusted
+
+    labels = [colors[index].label for index in selected]
+    oklab = np.asarray([colors[index].oklab for index in selected], dtype=np.float64)
     adjusted_labels, adjusted_oklab = _adjust_oklab_labels(oklab, adjustments, workspace, source_labels=labels)
 
-    for index, color in enumerate(colors):
-        color.label = int(adjusted_labels[index])
-        color.oklab = tuple(float(value) for value in adjusted_oklab[index])
+    for adjusted_index, color_index in enumerate(selected):
+        colors[color_index].label = int(adjusted_labels[adjusted_index])
+        colors[color_index].oklab = tuple(float(value) for value in adjusted_oklab[adjusted_index])
 
     for ramp in adjusted.ramps:
         seed_color = next((color for color in ramp.colors if color.is_seed), ramp.colors[0] if ramp.colors else None)
