@@ -1,17 +1,25 @@
+<p align="center">
+  <img src="pixel-fix.png" alt="pixel-fix" width="320">
+</p>
+
 # pixel-fix
 
-`pixel-fix` is a desktop-first tool for turning noisy AI-generated "pixel-art-like" images into cleaner, more controllable pixel art.
+`pixel-fix` is a desktop-first tool for cleaning up pixel-art-like PNGs into something easier to edit, palette, and export.
 
-The project is currently centered on a Windows-friendly Tkinter GUI with a staged workflow:
+The current app is a Windows-friendly Tkinter GUI built around a simple staged workflow:
 
 1. Determine pixel scale
 2. Downsample
 3. Apply palette
 4. Adjust palette
 
-The GUI is the primary, most up-to-date interface. A CLI entrypoint exists, but the desktop app reflects the current workflow much more accurately.
+The GUI is the main product. The CLI entrypoint still exists, but the desktop app is the authoritative workflow.
 
-## Quick start
+## Screenshot
+
+![pixel-fix screenshot](screenshot.png)
+
+## Quick Start
 
 ### Install for development
 
@@ -21,245 +29,229 @@ python -m pip install -e .
 
 ### Launch the GUI
 
+From the repository root:
+
 ```bash
 python -c "from pixel_fix.gui import main; raise SystemExit(main())"
 ```
 
-If your Python user scripts directory is on `PATH`, this also works:
+If you are using the project virtual environment directly on Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from pixel_fix.gui import main; raise SystemExit(main())"
+```
+
+If the script entrypoints are installed and on `PATH`, this also works:
 
 ```bash
 pixel-fix-gui
 ```
 
-## What the Windows app does
+## What The App Does
 
 From one interface, you can:
 
-- Open a PNG and inspect it in the original or processed view.
-- Pick a manual pixel size, then downsample with:
+- Open a PNG and switch between `Original` and `Processed` views.
+- Set a manual `Pixel size` and downsample with:
   - `Nearest Neighbor`
   - `Bilinear Interpolation`
   - `RotSprite`
 - Build palettes in several ways:
-  - pick up to 24 key colours manually from the original image
-  - auto-detect key colours from the original image
-  - generate colour ramps from those key colours
-  - generate reduced palettes with `Median Cut` or `K-Means Clustering`
-  - load bundled `.gpl` palettes from the `palettes/` tree
-  - browse for and load external `.gpl` palettes
-  - load legacy `.json` palettes
-- Adjust the current palette non-destructively with:
+  - manually pick key colours from the original image
+  - auto-detect key colours
+  - generate structured ramps from those key colours
+  - generate a reduced palette with `Median Cut` or `K-Means Clustering`
+  - load built-in `.gpl` palettes from the repository
+  - load external `.gpl` or legacy `.json` palettes
+- Edit the current palette directly:
+  - add colours from the original image
+  - add colours by hex code
+  - remove selected swatches
+  - sort the current palette by lightness, hue, saturation, chroma, or temperature
+- Select palette colours quickly:
+  - click, `Shift`-click, `Ctrl`-click, and `Ctrl`-drag in the palette strip
+  - `All` / `None` buttons
+  - `Select` menu commands based on lightness, saturation, chroma, temperature, and hue buckets
+  - `Selection Threshold` preference from `10%` to `100%`
+- Adjust the whole palette or just the selected swatches with:
   - `Brightness`
   - `Contrast`
   - `Hue`
   - `Saturation`
 - Apply the current palette only when you click `Apply Palette`.
-- Compare processed vs original quickly with the processed/original view toggle and right-click quick compare.
-- Zoom up to `1600%`.
-- Save the current palette as `.gpl`.
+- Remove connected regions to transparency with the processed-image transparency picker.
+- Add a 1-pixel exterior outline around the current processed silhouette using one selected palette colour.
+- Remove a 1-pixel exterior outline by eroding the outside edge to transparency.
+- Use dithering when applying palettes:
+  - `None`
+  - `Ordered (Bayer)`
+  - `Blue Noise`
 - Save the processed image as PNG.
+- Save the current palette as `.gpl`.
 
-## Recommended GUI workflow
+## Recommended Workflow
 
 1. Open an image.
 2. Set the pixel size in `1. Determine pixel scale`.
 3. Click `Downsample`.
-4. Choose how to build the palette:
-   - manual key colours + `Generate Ramps`
-   - `Auto Detect Key Colours` + `Generate Ramps`
-   - `Generate Reduced Palette`
-   - built-in or loaded palette
-5. Optionally tweak the current palette in `4. Adjust palette`.
+4. Build or load a palette:
+   - pick key colours and click `Generate Ramps`
+   - click `Auto Detect Key Colours` and then `Generate Ramps`
+   - click `Generate Reduced Palette`
+   - load a built-in or external palette
+5. Optionally sort, select, add, remove, or adjust palette colours.
 6. Click `Apply Palette`.
-7. Compare the result against the original, then save the image or save the palette.
+7. Optionally use `Make Transparent`, `Add Outline`, or `Remove Outline` on the processed result.
+8. Compare the result against the original, then save the image or palette.
 
-The important design rule is:
+Important behavior:
 
-- palette-building and palette-adjustment change the `Current palette` preview immediately
-- the processed image does not change until `Apply Palette` is clicked
+- palette generation, palette sorting, palette selection, and palette adjustments update the `Current palette` preview immediately
+- the processed image does not change until you click `Apply Palette`
 
-## What happens behind the scenes
+## Current GUI Layout
 
 ### 1. Determine pixel scale
 
-The app currently uses an explicit `Pixel size` value instead of auto grid detection.
+The app currently uses an explicit `Pixel size` value rather than automatic grid detection in the main workflow.
 
-That value tells the pipeline how many source pixels should collapse into one output pixel in each direction.
-
-If the source image is `512x512` and the pixel size is `2`, the target working image becomes `256x256`.
+If the source image is `512x512` and `Pixel size` is `2`, the working image becomes `256x256`.
 
 ### 2. Downsample
 
-Downsampling is handled in [`src/pixel_fix/resample.py`](./src/pixel_fix/resample.py). The three resize modes are intentionally different:
+Downsampling is handled in [`src/pixel_fix/resample.py`](src/pixel_fix/resample.py). The three resize modes behave differently:
 
 - `Nearest Neighbor`
-  - Preserves hard edges and exact source samples.
-  - Best when the image already has very clean, blocky structure.
+  - keeps hard source samples
+  - best when the source is already very blocky
 - `Bilinear Interpolation`
-  - Smooths before reduction.
-  - Useful when the source is noisy or anti-aliased and you want softer averaging.
+  - smooths during reduction
+  - useful when the source is noisy or slightly anti-aliased
 - `RotSprite`
-  - Implemented here as a pragmatic RotSprite-style approximation.
-  - Internally it uses repeated `Scale2x`-style enlargement to protect diagonals, then samples back down with nearest-neighbor.
-  - This can preserve some sprite-like edge character better than plain bilinear.
+  - uses a practical RotSprite-style approximation to protect diagonals before resampling back down
 
-The output of this stage is the reduced working image that all later palette work operates on.
+### 3. Apply palette
 
-### 3. Build or select a palette
+This stage is where most of the toolset lives.
 
-The palette stage has multiple branches depending on how you want control.
+#### Key-colour ramp workflow
 
-#### Manual key colours
+You can build a structured palette from manually chosen or auto-detected key colours. The ramp generator in [`src/pixel_fix/palette/advanced.py`](src/pixel_fix/palette/advanced.py) works in perceptual colour space and produces grouped ramps instead of a flat list of unrelated RGB values.
 
-If you pick key colours yourself, those colours are used as anchors for ramp generation.
+Controls in this stage let you:
 
-Ramp generation is implemented in [`src/pixel_fix/palette/advanced.py`](./src/pixel_fix/palette/advanced.py) and works in perceptual colour space:
+- pick key colours from the original image
+- auto-detect a configurable number of key colours
+- remove or clear key colours
+- generate ramps
+- generate a reduced palette from the downsampled image
+- apply the current palette to the processed image
 
-- colours are converted from sRGB into `Oklab`
-- hue/chroma/lightness operations are performed in `OKLCh`
-- each key colour is treated as the center of a ramp
-- lighter shades shift slightly warmer
-- darker shades shift slightly cooler
-- the `Ramp Contrast` control spreads shades further apart
+#### Palette strip editing
 
-This produces a structured palette made of grouped ramps rather than a flat list of unrelated RGB centroids.
+The `Current palette` strip is live and editable before apply:
 
-#### Auto-detected key colours
+- `+` adds a colour to the current palette
+- `-` removes selected colours
+- `All` selects every swatch
+- `None` clears selection
 
-If you use `Auto Detect Key Colours`, the detector scans the original RGBA image and tries to find representative material/object colours.
+Selection-aware editing is built in:
 
-The current implementation:
+- if no swatches are selected, palette adjustments affect the full current palette
+- if swatches are selected, palette adjustments only affect that subset
 
-- ignores nearly transparent pixels
-- builds a weighted histogram of visible colours
-- converts those colours into `Oklab` / `OKLCh`
-- separates neutral colours from chromatic colours
-- finds major hue families on a circular hue histogram
-- picks a representative exact source colour from the midtone range of each family
+#### Palette menu tools
 
-This gives you a starting set of key colours without inventing synthetic colours that were never in the image.
+The `Palette` menu currently includes:
 
-#### Reduced override palettes
+- input and output colour-mode controls
+- built-in palette browser
+- add-colour tools
+- sort current palette
+- load palette
+- save current palette
 
-If you choose `Generate Reduced Palette`, the app creates a flat override palette from the already-downsampled image.
+The `Select` menu lets you select colours in the current palette by:
 
-That happens in [`src/pixel_fix/palette/quantize.py`](./src/pixel_fix/palette/quantize.py):
+- dark/light lightness
+- low/high saturation
+- low/high chroma
+- cool/warm temperature
+- hue buckets: red, yellow, green, cyan, blue, magenta
 
-- `Median Cut`
-  - Uses Pillow's median-cut quantizer.
-  - Good for quickly extracting a compact palette from noisy input.
-- `K-Means Clustering`
-  - Uses a simple iterative RGB k-means implementation in this project.
-  - Starts from the most common colours and refines cluster centers over several passes.
+The selection count is controlled by `Preferences > Selection Threshold`.
 
-These methods generate a palette preview only. The image is still untouched until `Apply Palette`.
+#### Processed-image tools
 
-#### Built-in and external palettes
+After a processed image exists, you can:
 
-Palette files are loaded through [`src/pixel_fix/palette/io.py`](./src/pixel_fix/palette/io.py).
+- `Make Transparent`
+  - click the processed image to remove only the connected region under the cursor
+- `Add Outline`
+  - requires exactly one selected swatch in the current palette
+  - adds a 1-pixel outline around the outside silhouette only
+- `Remove Outline`
+  - removes the outer inside edge of the current silhouette by making it transparent
 
-Supported formats:
+These tools work through the processed image's per-pixel alpha mask, so saved PNGs preserve the transparency.
 
-- GIMP `.gpl` files for loading and saving
-- legacy JSON palette files used by older versions of this project
+### 4. Adjust palette
 
-The GUI also scans the repository `palettes/` folder recursively and mirrors its folder structure as nested submenus, so bundled palettes stay organized the same way in the app as they are on disk.
-
-### 4. Adjust the current palette
-
-The `4. Adjust palette` section lets you transform the palette globally before applying it.
-
-This logic lives in [`src/pixel_fix/palette/adjust.py`](./src/pixel_fix/palette/adjust.py) and works in perceptual space:
+The adjustment stage uses perceptual palette operations from [`src/pixel_fix/palette/adjust.py`](src/pixel_fix/palette/adjust.py):
 
 - `Brightness`
-  - shifts palette lightness up or down
 - `Contrast`
-  - expands or compresses palette lightness around the palette's median lightness
 - `Hue`
-  - rotates hue angles in `OKLCh`
 - `Saturation`
-  - scales chroma
 
-Important detail:
+These adjustments modify the current palette preview first. The image only updates when you click `Apply Palette`.
 
-- the adjustment section does not edit the processed image live
-- it derives a new preview palette from the current base palette
-- `Apply Palette` is what commits that adjusted palette to the image
+## Preferences
 
-After a successful apply, the adjustment sliders reset to neutral because the adjustment has been baked into the palette that was just applied.
+The current `Preferences` menu includes:
 
-### 5. Map image colours to the palette
+- checkerboard background
+- resize method
+- palette reduction method
+- colour-ramp options:
+  - auto detect count
+  - ramp steps
+  - ramp contrast
+- dithering method
+- selection threshold
 
-When a generated ramp palette is used, mapping is perceptual rather than raw RGB.
+## Shortcuts
 
-The advanced palette code uses:
+- `Ctrl+O`: open image
+- `Ctrl+S`: save processed image
+- `Ctrl+Shift+S`: save processed image as
+- `Ctrl+Z`: undo
+- `Ctrl+1`: original view
+- `Ctrl+2`: processed view
+- `Ctrl+0`: fit zoom
+- `F5`: downsample
+- `F6`: apply palette
 
-- `Oklab` as the working colour space
-- `HyAB` distance for palette mapping
+## Saved Data
 
-HyAB treats lightness and chromatic difference separately, which is generally more useful than plain Euclidean RGB distance for readable pixel-art ramps.
-
-For larger palettes, the advanced module can also use a small k-d-tree helper for faster nearest-palette lookup.
-
-### 6. Dithering
-
-Palette application can use:
-
-- `None`
-- `Ordered (Bayer)`
-- `Blue Noise`
-
-For generated ramp palettes, dithering is ramp-aware: the mapper prefers to dither within the same ramp instead of jumping across unrelated material colours. That helps reduce ugly colour speckling.
-
-### 7. Structured palette metadata
-
-The advanced palette workflow does not just return a flat list of colours.
-
-It produces a structured palette model in [`src/pixel_fix/palette/model.py`](./src/pixel_fix/palette/model.py), including:
-
-- ramps
-- seed colours
-- shade order
-- source labels
-
-This makes it easier to support future features such as palette export, palette swapping, or more ramp-aware cleanup logic.
-
-## Current palette preview vs processed image
-
-The `Current palette` strip above the image is a preview of the palette that would be used if you clicked `Apply Palette` right now.
-
-That means it may represent:
-
-- a generated ramp palette
-- a reduced override palette
-- a built-in or loaded palette
-- the current processed palette with pending adjustment sliders applied
-
-This separation is intentional. It lets you audition palette changes quickly without constantly reprocessing the image.
-
-## Saved settings and logs
-
-The app stores per-user data outside the repository under `%APPDATA%\\pixel-fix`.
+Per-user app data is stored outside the repository under `%APPDATA%\\pixel-fix`.
 
 That includes:
 
 - settings
-- the process log
 - recent files
+- process log
 
-The process log records timestamps, file info, and setting changes between successful runs so you can see what changed from one process to the next.
+## Build A Windows Executable
 
-## Build a Windows executable
-
-The repository includes PNG icon source files in the root plus a generated `pixel-fix.ico` for Windows packaging.
+The repository includes PNG icon source files plus a generated `pixel-fix.ico` for Windows packaging.
 
 ### Build with the included PowerShell script
 
 ```powershell
 .\scripts\build_windows_exe.ps1
 ```
-
-This script regenerates the Windows icon and builds the GUI executable with PyInstaller.
 
 ### Manual build
 
@@ -274,22 +266,19 @@ Expected output:
 dist/pixel-fix-gui.exe
 ```
 
-## CLI status
+## CLI Status
 
-The CLI entrypoint exists and is useful for experimentation, but it currently lags behind the staged GUI workflow.
+The package still exposes:
 
-In particular:
+- `pixel-fix`
+- `pixel-fix-gui`
 
-- the GUI is the authoritative implementation for the current user workflow
-- `PixelFixPipeline` label-grid processing is real and tested
-- file-level CLI `run_file()` behavior is still intentionally minimal
+But the GUI is the most complete and current interface.
 
-So for real use, the GUI is the recommended path right now.
+## Project Structure
 
-## Project structure
-
-- [`src/pixel_fix/gui`](./src/pixel_fix/gui): Tkinter desktop app, settings, persistence, preview logic
-- [`src/pixel_fix/resample.py`](./src/pixel_fix/resample.py): pixel-size-based downsampling and RotSprite-style approximation
-- [`src/pixel_fix/palette`](./src/pixel_fix/palette): palette generation, adjustment, quantization, loading/saving, perceptual colour math
-- [`src/pixel_fix/pipeline.py`](./src/pixel_fix/pipeline.py): staged pipeline integration
-- [`tests`](./tests): unit tests covering resampling, palette logic, GUI state, and pipeline behavior
+- [`src/pixel_fix/gui`](src/pixel_fix/gui): Tkinter app, preview logic, persistence, GUI-side processing helpers
+- [`src/pixel_fix/resample.py`](src/pixel_fix/resample.py): downsampling and RotSprite-style resampling
+- [`src/pixel_fix/palette`](src/pixel_fix/palette): palette generation, adjustment, sorting, selection, quantization, loading, saving
+- [`src/pixel_fix/pipeline.py`](src/pixel_fix/pipeline.py): pipeline integration
+- [`tests`](tests): unit tests for GUI behavior, palette logic, processing, and pipeline code
