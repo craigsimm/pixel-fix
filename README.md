@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="pixel-fix.png" alt="pixel-fix" width="320">
+  <img src="pixel-fix.png">
 </p>
 
 # pixel-fix
