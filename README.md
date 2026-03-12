@@ -57,15 +57,14 @@ From one interface, you can:
   - `Bilinear Interpolation`
   - `RotSprite`
 - Build palettes in several ways:
-  - manually pick key colours from the original image
-  - auto-detect key colours
-  - generate structured ramps from those key colours
   - generate a reduced palette with `Median Cut` or `K-Means Clustering`
   - load built-in `.gpl` palettes from the repository
   - load external `.gpl` or legacy `.json` palettes
 - Edit the current palette directly:
   - add colours from the original image
   - add colours by hex code
+  - merge selected swatches into one perceptual median colour
+  - append ramps from selected swatches using the current ramp settings
   - remove selected swatches
   - sort the current palette by lightness, hue, saturation, chroma, or temperature
 - Select palette colours quickly:
@@ -95,11 +94,9 @@ From one interface, you can:
 2. Set the pixel size in `1. Determine pixel scale`.
 3. Click `Downsample`.
 4. Build or load a palette:
-   - pick key colours and click `Generate Ramps`
-   - click `Auto Detect Key Colours` and then `Generate Ramps`
    - click `Generate Reduced Palette`
    - load a built-in or external palette
-5. Optionally sort, select, add, remove, or adjust palette colours.
+5. Optionally sort, select, merge, ramp, add, remove, or adjust palette colours.
 6. Click `Apply Palette`.
 7. Optionally use `Make Transparent`, `Add Outline`, or `Remove Outline` on the processed result.
 8. Compare the result against the original, then save the image or palette.
@@ -134,16 +131,12 @@ Downsampling is handled in [`src/pixel_fix/resample.py`](src/pixel_fix/resample.
 
 This stage is where most of the toolset lives.
 
-#### Key-colour ramp workflow
+#### Selection-driven palette workflow
 
-You can build a structured palette from manually chosen or auto-detected key colours. The ramp generator in [`src/pixel_fix/palette/advanced.py`](src/pixel_fix/palette/advanced.py) works in perceptual colour space and produces grouped ramps instead of a flat list of unrelated RGB values.
+The palette editor is selection-driven. Use `Generate Reduced Palette` or load a palette first, then select swatches in the `Current palette` strip and edit them directly before apply.
 
 Controls in this stage let you:
 
-- pick key colours from the original image
-- auto-detect a configurable number of key colours
-- remove or clear key colours
-- generate ramps
 - generate a reduced palette from the downsampled image
 - apply the current palette to the processed image
 
@@ -153,6 +146,8 @@ The `Current palette` strip is live and editable before apply:
 
 - `+` adds a colour to the current palette
 - `-` removes selected colours
+- `Merge` replaces the selected swatches with one perceptual median colour
+- `Ramp` appends a full ramp for each selected swatch using the current ramp settings
 - `All` selects every swatch
 - `None` clears selection
 
@@ -215,7 +210,6 @@ The current `Preferences` menu includes:
 - resize method
 - palette reduction method
 - colour-ramp options:
-  - auto detect count
   - ramp steps
   - ramp contrast
 - dithering method

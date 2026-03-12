@@ -388,69 +388,32 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     assert gui._palette_undo_state is None
 
 
-def test_add_key_color_ignores_duplicates() -> None:
+def test_merge_selected_palette_colours_replaces_selection_with_merged_label() -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.workspace = ColorWorkspace()
+    gui.process_status_var = SimpleNamespace(set=lambda value: captured.setdefault("status", value))
+    gui._get_display_palette = lambda: ([0xFF0000, 0x00FF00, 0x0000FF], "Generated")
+    gui._apply_palette_edit = lambda palette, message: captured.update({"palette": palette, "message": message})
+    gui._palette_selection_indices = {0, 2}
+
+    PixelFixGui._merge_selected_palette_colors(gui)
+
+    assert captured["palette"][1] == 0x00FF00
+    assert len(captured["palette"]) == 2
+    assert captured["message"].startswith("Merged 2 palette colours into #")
+
+
+def test_merge_selected_palette_colours_requires_two_swatches() -> None:
     messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
-    gui.key_colors = []
-    gui.advanced_palette_preview = object()
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
-    gui._update_key_color_list = lambda: None
-    gui._mark_output_stale = lambda message=None: messages.append(message or "")
-    gui._update_palette_strip = lambda: None
-    gui._refresh_action_states = lambda: None
+    gui._get_display_palette = lambda: ([0x111111, 0x222222], "Generated")
+    gui._palette_selection_indices = {1}
 
-    PixelFixGui._add_key_color(gui, 0x112233)
-    PixelFixGui._add_key_color(gui, 0x112233)
+    PixelFixGui._merge_selected_palette_colors(gui)
 
-    assert gui.key_colors == [0x112233]
-    assert "already in the key-colour list" in messages[-1]
-
-
-def test_add_key_color_allows_twenty_four_and_blocks_twenty_five() -> None:
-    messages: list[str] = []
-    gui = PixelFixGui.__new__(PixelFixGui)
-    gui.key_colors = [index for index in range(24)]
-    gui.advanced_palette_preview = object()
-    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
-    gui._update_key_color_list = lambda: None
-    gui._mark_output_stale = lambda message=None: messages.append(message or "")
-    gui._update_palette_strip = lambda: None
-    gui._refresh_action_states = lambda: None
-
-    PixelFixGui._add_key_color(gui, 0x123456)
-
-    assert len(gui.key_colors) == 24
-    assert messages[-1] == "You can only pick up to 24 key colours."
-
-
-def test_update_key_color_list_refreshes_count_label() -> None:
-    entries: list[str] = []
-
-    class ListboxStub:
-        def curselection(self):
-            return ()
-
-        def delete(self, *_args):
-            entries.clear()
-
-        def insert(self, _index, value):
-            entries.append(value)
-
-        def itemconfig(self, *_args, **_kwargs):
-            return None
-
-        def selection_set(self, *_args):
-            return None
-
-    gui = PixelFixGui.__new__(PixelFixGui)
-    gui.key_colors = [0x111111, 0x222222, 0x333333]
-    gui.key_colors_label_var = SimpleNamespace(value="", set=lambda value: setattr(gui.key_colors_label_var, "value", value))
-    gui.key_color_listbox = ListboxStub()
-
-    PixelFixGui._update_key_color_list(gui)
-
-    assert gui.key_colors_label_var.value == "Key colours (3)"
-    assert entries == ["#111111", "#222222", "#333333"]
+    assert messages == ["Select 2 or more palette colours to merge."]
 
 
 def test_get_display_palette_reuses_cached_process_labels_for_neutral_adjustments() -> None:
@@ -548,94 +511,41 @@ def test_current_adjusted_structured_palette_only_adjusts_selected_swatches() ->
     assert labels[2] == gui.active_palette[2]
 
 
-def test_remove_selected_seed_removes_multiple_key_colours() -> None:
+def test_ramp_selected_palette_colours_appends_generated_ramps() -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.workspace = ColorWorkspace()
+    gui.process_status_var = SimpleNamespace(set=lambda value: captured.setdefault("status", value))
+    gui._get_display_palette = lambda: ([0x336699, 0xCC8844, 0x112233], "Generated")
+    gui._read_settings_from_controls = lambda *, strict=False: PreviewSettings(generated_shades=2, contrast_bias=0.7)
+    gui._apply_palette_edit = lambda palette, message: captured.update({"palette": palette, "message": message})
+    gui._palette_selection_indices = {0, 1}
+
+    PixelFixGui._ramp_selected_palette_colors(gui)
+
+    assert captured["palette"][:3] == [0x336699, 0xCC8844, 0x112233]
+    assert len(captured["palette"]) == 3 + (2 * 3)
+    assert captured["message"] == "Appended 6 ramp colours from 2 selected palette colours. Click Apply Palette to update the preview."
+
+
+def test_ramp_selected_palette_colours_requires_selection() -> None:
     messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
-    gui.key_colors = [0x111111, 0x222222, 0x333333]
-    gui.advanced_palette_preview = object()
-    gui.key_color_listbox = SimpleNamespace(curselection=lambda: (0, 2))
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
-    gui._update_key_color_list = lambda: None
-    gui._mark_output_stale = lambda message=None: messages.append(message or "")
-    gui._update_palette_strip = lambda: None
-    gui._refresh_action_states = lambda: None
+    gui._get_display_palette = lambda: ([0x111111, 0x222222], "Generated")
+    gui._palette_selection_indices = set()
 
-    PixelFixGui._remove_selected_seed(gui)
+    PixelFixGui._ramp_selected_palette_colors(gui)
 
-    assert gui.key_colors == [0x222222]
-    assert messages[-1] == "Key colours changed. Click Generate Ramps to rebuild the palette."
+    assert messages == ["Select one or more palette colours to ramp."]
 
 
-def test_auto_detect_key_colors_replaces_current_list(monkeypatch) -> None:
-    messages: list[str] = []
-    requested: dict[str, int] = {}
-    gui = PixelFixGui.__new__(PixelFixGui)
-    gui.original_display_image = Image.new("RGBA", (2, 2), (1, 2, 3, 255))
-    gui.active_palette = None
-    gui.image_state = "loaded_original"
-    gui.key_color_pick_mode = True
-    gui.key_colors = [0xABCDEF]
-    gui.advanced_palette_preview = object()
-    gui.session = SimpleNamespace(current=PreviewSettings(auto_detect_count=5))
-    gui.workspace = object()
-    gui.root = SimpleNamespace(update_idletasks=lambda: None)
-    gui.key_color_listbox = SimpleNamespace(selection_clear=lambda *_args: None)
-    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
-    gui._update_key_color_list = lambda: None
-    gui._mark_output_stale = lambda message=None: messages.append(message or "")
-    gui._update_palette_strip = lambda: None
-    gui._refresh_action_states = lambda: None
-
-    def fake_detect(*args, **kwargs):
-        requested["max_colors"] = kwargs["max_colors"]
-        return [0x112233, 0x445566]
-
-    monkeypatch.setattr(app_module, "detect_key_colors_from_image", fake_detect)
-
-    PixelFixGui._auto_detect_key_colors(gui)
-
-    assert requested["max_colors"] == 5
-    assert gui.key_color_pick_mode is False
-    assert gui.key_colors == [0x112233, 0x445566]
-    assert gui.advanced_palette_preview is None
-    assert messages[-1] == "Detected 2 key colours. Click Generate Ramps to rebuild the palette."
-
-
-def test_auto_detect_key_colors_keeps_existing_list_when_none_found(monkeypatch) -> None:
-    messages: list[str] = []
-    existing_preview = object()
-    gui = PixelFixGui.__new__(PixelFixGui)
-    gui.original_display_image = Image.new("RGBA", (2, 2), (1, 2, 3, 255))
-    gui.active_palette = None
-    gui.image_state = "loaded_original"
-    gui.key_color_pick_mode = False
-    gui.key_colors = [0xABCDEF]
-    gui.advanced_palette_preview = existing_preview
-    gui.session = SimpleNamespace(current=PreviewSettings(auto_detect_count=3))
-    gui.workspace = object()
-    gui.root = SimpleNamespace(update_idletasks=lambda: None)
-    gui.key_color_listbox = SimpleNamespace(selection_clear=lambda *_args: None)
-    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
-    gui._update_key_color_list = lambda: None
-    gui._mark_output_stale = lambda message=None: messages.append(message or "")
-    gui._update_palette_strip = lambda: None
-    gui._refresh_action_states = lambda: None
-    monkeypatch.setattr(app_module, "detect_key_colors_from_image", lambda *args, **kwargs: [])
-
-    PixelFixGui._auto_detect_key_colors(gui)
-
-    assert gui.key_colors == [0xABCDEF]
-    assert gui.advanced_palette_preview is existing_preview
-    assert messages[-1] == "No visible colours were found for auto-detection."
-
-
-def test_auto_detect_count_change_does_not_mark_output_stale() -> None:
+def test_ramp_settings_change_does_not_mark_output_stale() -> None:
     messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
     gui._clear_palette_undo_state = lambda: messages.append("clear")
     gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
-    gui._update_key_color_list = lambda: messages.append("list")
     gui._update_scale_info = lambda: messages.append("scale")
     gui._update_palette_strip = lambda: messages.append("palette")
     gui.redraw_canvas = lambda: messages.append("redraw")
@@ -644,11 +554,11 @@ def test_auto_detect_count_change_does_not_mark_output_stale() -> None:
 
     PixelFixGui._handle_settings_transition(
         gui,
-        PreviewSettings(auto_detect_count=12),
-        PreviewSettings(auto_detect_count=6),
+        PreviewSettings(generated_shades=4),
+        PreviewSettings(generated_shades=6),
     )
 
-    assert messages == ["Auto-detect count set to 6.", "persist", "refresh"]
+    assert messages == ["Ramp settings changed. Select palette colours and click Ramp to append new ramps.", "persist", "refresh"]
 
 
 def test_palette_reduction_settings_change_does_not_mark_output_stale() -> None:
@@ -657,7 +567,6 @@ def test_palette_reduction_settings_change_does_not_mark_output_stale() -> None:
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
     gui._clear_palette_undo_state = lambda: messages.append("clear")
     gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
-    gui._update_key_color_list = lambda: messages.append("list")
     gui._update_scale_info = lambda: messages.append("scale")
     gui._update_palette_strip = lambda: messages.append("palette")
     gui.redraw_canvas = lambda: messages.append("redraw")
@@ -681,7 +590,6 @@ def test_downsample_setting_change_marks_downsample_stale_and_clears_cache() -> 
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
     gui._clear_palette_undo_state = lambda: messages.append("clear")
     gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
-    gui._update_key_color_list = lambda: messages.append("list")
     gui._update_palette_adjustment_labels = lambda: messages.append("adjust")
     gui._update_scale_info = lambda: messages.append("scale")
     gui._update_palette_strip = lambda: messages.append("palette")
@@ -700,7 +608,6 @@ def test_downsample_setting_change_marks_downsample_stale_and_clears_cache() -> 
     assert messages == [
         "clear",
         "stale:Downsample settings changed. Click Downsample to update the preview.",
-        "list",
         "adjust",
         "scale",
         "palette",
@@ -731,7 +638,6 @@ def test_generate_override_palette_uses_downsampled_labels_and_marks_stale(monke
     )
     gui.active_palette = None
     gui.advanced_palette_preview = SimpleNamespace(palette_size=lambda: 6)
-    gui.key_colors = []
     gui.session = SimpleNamespace(current=PreviewSettings(palette_reduction_colors=24, quantizer="kmeans", generated_shades=4))
     gui._apply_active_palette = lambda palette, source, path_value, *, message, mark_stale=True: captured.update(
         {
@@ -840,9 +746,7 @@ def test_open_image_path_clears_palette_and_transparency_state(monkeypatch, tmp_
     gui.transparent_colors = {0x112233}
     gui._palette_selection_indices = {0}
     gui._displayed_palette = [0x112233]
-    gui.key_colors = [0x445566]
     gui.advanced_palette_preview = object()
-    gui.key_color_pick_mode = True
     gui.palette_add_pick_mode = True
     gui.transparency_pick_mode = True
     gui.downsample_result = object()
@@ -863,7 +767,6 @@ def test_open_image_path_clears_palette_and_transparency_state(monkeypatch, tmp_
     gui._set_view = lambda _value: None
     gui.zoom_fit = lambda: None
     gui._update_scale_info = lambda: None
-    gui._update_key_color_list = lambda: None
     gui._update_palette_strip = lambda: None
     gui.redraw_canvas = lambda: None
     gui._refresh_action_states = lambda: None
@@ -882,8 +785,6 @@ def test_open_image_path_clears_palette_and_transparency_state(monkeypatch, tmp_
     assert gui.transparent_colors == set()
     assert gui.downsample_result is None
     assert gui.palette_result is None
-    assert gui.key_colors == []
-    assert gui.key_color_pick_mode is False
     assert gui.palette_add_pick_mode is False
     assert gui.transparency_pick_mode is False
     assert gui.image_state == "loaded_original"
@@ -894,8 +795,7 @@ def test_canvas_motion_updates_live_pick_preview() -> None:
     cursor_updates: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
     gui.dragging = False
-    gui.key_color_pick_mode = True
-    gui.palette_add_pick_mode = False
+    gui.palette_add_pick_mode = True
     gui.transparency_pick_mode = False
     gui.pick_preview_var = SimpleNamespace(value="", set=lambda value: setattr(gui.pick_preview_var, "value", value))
     gui.pick_preview_frame = PickerPreviewFrameStub()
@@ -915,8 +815,7 @@ def test_canvas_leave_clears_live_pick_preview() -> None:
     cursor_updates: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
     gui.dragging = False
-    gui.key_color_pick_mode = True
-    gui.palette_add_pick_mode = False
+    gui.palette_add_pick_mode = True
     gui.transparency_pick_mode = False
     gui.pick_preview_var = SimpleNamespace(value="", set=lambda value: setattr(gui.pick_preview_var, "value", value))
     gui.pick_preview_frame = PickerPreviewFrameStub()
@@ -1249,13 +1148,10 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
     gui._palette_undo_state = None
     gui._palette_selection_indices = {0}
     gui._displayed_palette = [0x112233, 0x445566]
-    gui.key_color_pick_mode = False
+    gui.palette_add_pick_mode = False
     gui.transparency_pick_mode = False
-    gui.key_colors = []
     gui.session = SimpleNamespace(history=SimpleNamespace(can_undo=lambda: False))
-    gui.key_color_listbox = SimpleNamespace(curselection=lambda: (), configure=lambda **_kwargs: None)
     gui.downsample_button = WidgetStub()
-    gui.generate_ramps_button = WidgetStub()
     gui.generate_override_palette_button = WidgetStub()
     gui.reduce_palette_button = WidgetStub()
     gui.transparency_button = WidgetStub()
@@ -1263,11 +1159,9 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
     gui.remove_outline_button = WidgetStub()
     gui.zoom_in_button = WidgetStub()
     gui.zoom_out_button = WidgetStub()
-    gui.pick_seed_button = WidgetStub()
-    gui.auto_detect_button = WidgetStub()
-    gui.remove_seed_button = WidgetStub()
-    gui.clear_seeds_button = WidgetStub()
     gui.add_palette_color_button = WidgetStub()
+    gui.merge_palette_button = WidgetStub()
+    gui.ramp_palette_button = WidgetStub()
     gui.select_all_palette_button = WidgetStub()
     gui.clear_palette_selection_button = WidgetStub()
     gui.remove_palette_color_button = WidgetStub()
@@ -1292,6 +1186,57 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
 
     assert gui.add_outline_button.state == app_module.tk.NORMAL
     assert gui.remove_outline_button.state == app_module.tk.NORMAL
+    assert gui.merge_palette_button.state == app_module.tk.DISABLED
+    assert gui.ramp_palette_button.state == app_module.tk.NORMAL
+
+
+def test_refresh_action_states_enables_merge_with_multiple_selected_swatches() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "processed_current"
+    gui.original_grid = _sample_grid()
+    gui.prepared_input_cache = object()
+    gui._palette_undo_state = None
+    gui._palette_selection_indices = {0, 1}
+    gui._displayed_palette = [0x112233, 0x445566]
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.session = SimpleNamespace(history=SimpleNamespace(can_undo=lambda: False))
+    gui.downsample_button = WidgetStub()
+    gui.generate_override_palette_button = WidgetStub()
+    gui.reduce_palette_button = WidgetStub()
+    gui.transparency_button = WidgetStub()
+    gui.add_outline_button = WidgetStub()
+    gui.remove_outline_button = WidgetStub()
+    gui.zoom_in_button = WidgetStub()
+    gui.zoom_out_button = WidgetStub()
+    gui.add_palette_color_button = WidgetStub()
+    gui.merge_palette_button = WidgetStub()
+    gui.ramp_palette_button = WidgetStub()
+    gui.select_all_palette_button = WidgetStub()
+    gui.clear_palette_selection_button = WidgetStub()
+    gui.remove_palette_color_button = WidgetStub()
+    gui.pixel_width_spinbox = WidgetStub()
+    gui.palette_reduction_spinbox = WidgetStub()
+    gui.palette_adjustment_controls = []
+    gui._menu_items = {
+        "view": MenuStub(),
+        "file": MenuStub(),
+        "edit": MenuStub(),
+        "palette": MenuStub(),
+        "palette_add": MenuStub(),
+        "preferences": MenuStub(),
+    }
+    gui._menu_bar = MenuStub()
+    gui._refresh_primary_button_style = lambda _button: None
+    gui._palette_is_override_mode = lambda: False
+    gui._has_palette_source = lambda: True
+    gui._current_output_result = lambda: object()
+
+    PixelFixGui._refresh_action_states(gui)
+
+    assert gui.merge_palette_button.state == app_module.tk.NORMAL
+    assert gui.ramp_palette_button.state == app_module.tk.NORMAL
+    assert gui.add_outline_button.state == app_module.tk.DISABLED
 
 
 def test_add_transparent_region_updates_output_and_undo_restores() -> None:
@@ -1524,7 +1469,6 @@ def test_palette_adjustment_change_marks_output_stale_and_refreshes_palette() ->
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
     gui._clear_palette_undo_state = lambda: messages.append("clear")
     gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
-    gui._update_key_color_list = lambda: messages.append("list")
     gui._update_palette_adjustment_labels = lambda: messages.append("adjust")
     gui._update_scale_info = lambda: messages.append("scale")
     gui._update_palette_strip = lambda: messages.append("palette")
@@ -1542,7 +1486,6 @@ def test_palette_adjustment_change_marks_output_stale_and_refreshes_palette() ->
     assert messages == [
         "clear",
         "stale:Palette adjustments changed. Click Apply Palette to update the preview.",
-        "list",
         "adjust",
         "scale",
         "palette",
@@ -1558,7 +1501,6 @@ def test_selected_palette_adjustment_change_uses_selection_message() -> None:
     gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
     gui._clear_palette_undo_state = lambda: messages.append("clear")
     gui._mark_output_stale = lambda message=None: messages.append(f"stale:{message}")
-    gui._update_key_color_list = lambda: messages.append("list")
     gui._update_palette_adjustment_labels = lambda: messages.append("adjust")
     gui._update_scale_info = lambda: messages.append("scale")
     gui._update_palette_strip = lambda: messages.append("palette")

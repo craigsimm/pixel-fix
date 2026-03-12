@@ -7,6 +7,7 @@ from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels, 
 from pixel_fix.palette.advanced import detect_key_colors_from_image, generate_structured_palette
 from pixel_fix.palette.color_modes import convert_mode, extract_unique_colors, to_indexed
 from pixel_fix.palette.dither import apply_dither
+from pixel_fix.palette.edit import generate_ramp_palette_labels, merge_palette_labels
 from pixel_fix.palette.io import load_palette, save_palette
 from pixel_fix.palette.quantize import generate_palette, remap_to_palette
 from pixel_fix.palette.replace import replace_batch, replace_exact, replace_tolerance
@@ -279,6 +280,42 @@ def test_generate_structured_palette_caps_key_colours_at_twenty_four() -> None:
     )
     assert len(computation.palette.key_colors) == 24
     assert len(computation.palette.ramps) == 24
+
+
+def test_merge_palette_labels_uses_oklab_channel_median() -> None:
+    workspace = ColorWorkspace()
+    labels = [0xFF0000, 0x00FF00, 0x0000FF]
+
+    merged = merge_palette_labels(labels, workspace=workspace)
+    expected = workspace.oklab_to_label(np.median(workspace.labels_to_oklab(labels), axis=0))
+
+    assert merged == expected
+
+
+def test_generate_ramp_palette_labels_matches_existing_seed_ramp() -> None:
+    labels = generate_ramp_palette_labels(
+        [0x336699],
+        generated_shades=2,
+        contrast_bias=0.7,
+    )
+    expected = generate_structured_palette(
+        [],
+        key_colors=[0x336699],
+        generated_shades=2,
+        contrast_bias=0.7,
+    ).palette.labels()
+
+    assert labels == expected
+
+
+def test_generate_ramp_palette_labels_supports_more_than_twenty_four_seeds() -> None:
+    labels = generate_ramp_palette_labels(
+        [index for index in range(25)],
+        generated_shades=2,
+        contrast_bias=1.0,
+    )
+
+    assert len(labels) == 25 * 3
 
 
 def test_adjust_palette_labels_changes_palette_in_oklab_space() -> None:
