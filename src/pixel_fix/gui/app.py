@@ -238,6 +238,7 @@ class PixelFixGui:
         self.quantizer_var = tk.StringVar()
         self.dither_var = tk.StringVar()
         self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
+        self.outline_pixel_perfect_var = tk.BooleanVar(value=bool(persisted.get("outline_pixel_perfect", True)))
         self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
         self.scale_info_var = tk.StringVar(value="Open an image to set the pixel size.")
         self.palette_info_var = tk.StringVar(value="Palette: none")
@@ -449,6 +450,13 @@ class PixelFixGui:
         self.add_outline_button.pack(side=tk.LEFT)
         self.remove_outline_button = ttk.Button(outline_row, text="Remove Outline", command=self._remove_outline)
         self.remove_outline_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.outline_pixel_perfect_toggle = ttk.Checkbutton(
+            outline_row,
+            text="Pixel Perfect",
+            variable=self.outline_pixel_perfect_var,
+            command=self._on_outline_pixel_perfect_changed,
+        )
+        self.outline_pixel_perfect_toggle.pack(side=tk.LEFT, padx=(10, 0))
 
         adjust_section = self._create_section(sidebar, "4. Adjust palette")
         self.palette_adjustment_controls: list[tk.Scale] = []
@@ -1322,6 +1330,15 @@ class PixelFixGui:
             return None
         return displayed[selected[0]]
 
+    def _outline_pixel_perfect_enabled(self) -> bool:
+        variable = getattr(self, "outline_pixel_perfect_var", None)
+        if variable is None:
+            return True
+        getter = getattr(variable, "get", None)
+        if callable(getter):
+            return bool(getter())
+        return bool(variable)
+
     def _set_current_output_result(self, result: ProcessResult) -> None:
         if getattr(self, "palette_result", None) is not None:
             self.palette_result = result
@@ -1336,18 +1353,32 @@ class PixelFixGui:
         if outline_label is None:
             self.process_status_var.set("Select exactly one palette colour to add an outline.")
             return
-        updated, changed = add_exterior_outline(current, outline_label, transparent_labels=getattr(self, "transparent_colors", set()))
+        pixel_perfect = self._outline_pixel_perfect_enabled()
+        updated, changed = add_exterior_outline(
+            current,
+            outline_label,
+            transparent_labels=getattr(self, "transparent_colors", set()),
+            pixel_perfect=pixel_perfect,
+        )
         if changed <= 0:
-            self.process_status_var.set("No exterior outline pixels were available to add.")
+            if pixel_perfect:
+                self.process_status_var.set("No pixel-perfect exterior outline pixels were available to add.")
+            else:
+                self.process_status_var.set("No exterior outline pixels were available to add.")
             return
         self._capture_palette_undo_state()
         self.transparent_colors = set()
         self._set_current_output_result(updated)
         self._refresh_output_display_images()
         self._set_view("processed")
-        self.process_status_var.set(
-            f"Added outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
-        )
+        if pixel_perfect:
+            self.process_status_var.set(
+                f"Added pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
+            )
+        else:
+            self.process_status_var.set(
+                f"Added outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
+            )
         self._update_palette_strip()
         self._update_image_info()
         self.redraw_canvas()
@@ -1357,16 +1388,29 @@ class PixelFixGui:
         current = self._current_output_result()
         if current is None or self.image_state == "processing":
             return
-        updated, changed = remove_exterior_outline(current, transparent_labels=getattr(self, "transparent_colors", set()))
+        pixel_perfect = self._outline_pixel_perfect_enabled()
+        updated, changed = remove_exterior_outline(
+            current,
+            transparent_labels=getattr(self, "transparent_colors", set()),
+            pixel_perfect=pixel_perfect,
+        )
         if changed <= 0:
-            self.process_status_var.set("No exterior outline pixels were found to remove.")
+            if pixel_perfect:
+                self.process_status_var.set("No pixel-perfect edge pixels were found to remove.")
+            else:
+                self.process_status_var.set("No exterior outline pixels were found to remove.")
             return
         self._capture_palette_undo_state()
         self.transparent_colors = set()
         self._set_current_output_result(updated)
         self._refresh_output_display_images()
         self._set_view("processed")
-        self.process_status_var.set(f"Removed {changed} outline pixel{'s' if changed != 1 else ''}. Press Undo to restore it.")
+        if pixel_perfect:
+            self.process_status_var.set(
+                f"Removed {changed} pixel-perfect edge pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+            )
+        else:
+            self.process_status_var.set(f"Removed {changed} outline pixel{'s' if changed != 1 else ''}. Press Undo to restore it.")
         self._update_palette_strip()
         self._update_image_info()
         self.redraw_canvas()
@@ -2441,6 +2485,9 @@ class PixelFixGui:
         self.redraw_canvas()
         self._schedule_state_persist()
 
+    def _on_outline_pixel_perfect_changed(self) -> None:
+        self._schedule_state_persist()
+
     def _schedule_state_persist(self) -> None:
         if self._persist_after_id is not None:
             self.root.after_cancel(self._persist_after_id)
@@ -2459,6 +2506,7 @@ class PixelFixGui:
                 "zoom": self.zoom,
                 "selection_threshold": self._selection_threshold_percent(),
                 "checkerboard": self.checkerboard_var.get(),
+                "outline_pixel_perfect": self._outline_pixel_perfect_enabled(),
                 "view_mode": self.view_var.get(),
                 "recent_files": self.recent_files,
             }

@@ -103,6 +103,14 @@ class MenuStub:
         self.states[label] = kwargs.get("state")
 
 
+def _assert_no_full_2x2(mask: list[list[bool]]) -> None:
+    height = len(mask)
+    width = len(mask[0]) if height else 0
+    for y in range(max(0, height - 1)):
+        for x in range(max(0, width - 1)):
+            assert not (mask[y][x] and mask[y][x + 1] and mask[y + 1][x] and mask[y + 1][x + 1])
+
+
 def test_downsample_image_returns_metadata_and_progress() -> None:
     progress: list[tuple[int, str]] = []
     result = downsample_image(
@@ -250,7 +258,7 @@ def test_apply_transparency_fill_only_removes_connected_region() -> None:
     )
 
 
-def test_add_exterior_outline_adds_ring_without_touching_interior() -> None:
+def test_add_exterior_outline_defaults_to_pixel_perfect_diamond() -> None:
     result = _result_from_labels(
         [
             [0x000000, 0x000000, 0x000000],
@@ -261,13 +269,35 @@ def test_add_exterior_outline_adds_ring_without_touching_interior() -> None:
 
     updated, changed = add_exterior_outline(result, 0x112233)
 
-    assert changed == 8
+    assert changed == 4
     assert updated.grid[1][1] == (0x44, 0x55, 0x66)
+    assert updated.alpha_mask is not None
+    assert updated.alpha_mask[0][0] is False
+    assert updated.alpha_mask[0][1] is True
+    assert updated.grid[0][1] == (0x11, 0x22, 0x33)
+    assert updated.grid[1][0] == (0x11, 0x22, 0x33)
+    assert updated.grid[1][2] == (0x11, 0x22, 0x33)
+    assert updated.grid[2][1] == (0x11, 0x22, 0x33)
+    assert updated.alpha_mask[2][2] is False
+
+
+def test_add_exterior_outline_square_mode_keeps_full_ring() -> None:
+    result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000],
+            [0x000000, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000],
+        ]
+    )
+
+    updated, changed = add_exterior_outline(result, 0x112233, pixel_perfect=False)
+
+    assert changed == 8
     assert updated.grid[0][0] == (0x11, 0x22, 0x33)
     assert updated.alpha_mask is None
 
 
-def test_add_exterior_outline_ignores_internal_holes() -> None:
+def test_add_exterior_outline_pixel_perfect_ignores_internal_holes() -> None:
     result = _result_from_labels(
         [
             [0x000000, 0x000000, 0x000000, 0x000000, 0x000000],
@@ -280,14 +310,61 @@ def test_add_exterior_outline_ignores_internal_holes() -> None:
 
     updated, changed = add_exterior_outline(result, 0x112233)
 
-    assert changed == 16
+    assert changed == 12
     assert updated.alpha_mask is not None
     assert updated.alpha_mask[2][2] is False
     assert updated.grid[2][2] == (0, 0, 0)
+    assert updated.alpha_mask[0][0] is False
     assert updated.grid[0][2] == (0x11, 0x22, 0x33)
 
 
-def test_remove_exterior_outline_erodes_only_outside_edge() -> None:
+def test_add_exterior_outline_pixel_perfect_stair_step_has_no_full_2x2_blocks() -> None:
+    result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000, 0x000000, 0x000000],
+            [0x000000, 0x445566, 0x000000, 0x000000, 0x000000],
+            [0x000000, 0x000000, 0x445566, 0x000000, 0x000000],
+            [0x000000, 0x000000, 0x000000, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000, 0x000000, 0x000000],
+        ]
+    )
+
+    updated, changed = add_exterior_outline(result, 0x112233)
+
+    assert changed > 0
+    assert updated.alpha_mask is not None
+    added_mask = [
+        [bool(updated.alpha_mask[y][x]) and not bool(result.alpha_mask[y][x]) for x in range(result.width)]
+        for y in range(result.height)
+    ]
+    _assert_no_full_2x2(added_mask)
+
+
+def test_remove_exterior_outline_defaults_to_pixel_perfect_edge_removal() -> None:
+    result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000, 0x000000, 0x000000],
+            [0x000000, 0x445566, 0x445566, 0x445566, 0x000000],
+            [0x000000, 0x445566, 0x445566, 0x445566, 0x000000],
+            [0x000000, 0x445566, 0x445566, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000, 0x000000, 0x000000],
+        ]
+    )
+
+    updated, changed = remove_exterior_outline(result)
+
+    assert changed == 4
+    assert updated.alpha_mask is not None
+    assert updated.alpha_mask[1][1] is True
+    assert updated.alpha_mask[1][2] is False
+    assert updated.alpha_mask[2][1] is False
+    assert updated.alpha_mask[2][2] is True
+    assert updated.alpha_mask[2][3] is False
+    assert updated.alpha_mask[3][2] is False
+    assert updated.alpha_mask[3][3] is True
+
+
+def test_remove_exterior_outline_square_mode_erodes_only_outside_edge() -> None:
     result = _result_from_labels(
         [
             [0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000],
@@ -300,7 +377,7 @@ def test_remove_exterior_outline_erodes_only_outside_edge() -> None:
         ]
     )
 
-    updated, changed = remove_exterior_outline(result)
+    updated, changed = remove_exterior_outline(result, pixel_perfect=False)
 
     assert changed == 16
     assert updated.alpha_mask is not None
@@ -319,7 +396,7 @@ def test_remove_exterior_outline_can_erase_one_pixel_wide_shape() -> None:
         ]
     )
 
-    updated, changed = remove_exterior_outline(result)
+    updated, changed = remove_exterior_outline(result, pixel_perfect=False)
 
     assert changed == 3
     assert updated.alpha_mask == (
@@ -848,6 +925,7 @@ def test_persist_state_omits_palette_adjustment_values(monkeypatch) -> None:
     gui.zoom = 125
     gui.selection_threshold_var = SimpleNamespace(get=lambda: 30)
     gui.checkerboard_var = SimpleNamespace(get=lambda: True)
+    gui.outline_pixel_perfect_var = SimpleNamespace(get=lambda: False)
     gui.view_var = SimpleNamespace(get=lambda: "processed")
     gui.recent_files = ["example.png"]
 
@@ -861,6 +939,7 @@ def test_persist_state_omits_palette_adjustment_values(monkeypatch) -> None:
     assert "palette_hue" not in settings
     assert "palette_saturation" not in settings
     assert captured["selection_threshold"] == 30
+    assert captured["outline_pixel_perfect"] is False
 
 
 def test_add_colour_to_current_palette_materializes_display_palette() -> None:
@@ -1326,6 +1405,7 @@ def test_add_outline_from_selection_updates_output_and_undo_restores() -> None:
     gui.session = SimpleNamespace(current=PreviewSettings())
     gui.quick_compare_active = False
     gui.view_var = SimpleNamespace(set=lambda _value: None)
+    gui.outline_pixel_perfect_var = SimpleNamespace(get=lambda: True)
     gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
     gui._displayed_palette = [0x112233]
     gui._palette_selection_indices = {0}
@@ -1341,11 +1421,62 @@ def test_add_outline_from_selection_updates_output_and_undo_restores() -> None:
 
     PixelFixGui._add_outline_from_selection(gui)
 
-    assert gui.palette_display_image.getpixel((0, 0)) == (0x11, 0x22, 0x33, 255)
+    assert gui.palette_display_image.getpixel((0, 0))[3] == 0
+    assert gui.palette_display_image.getpixel((1, 0)) == (0x11, 0x22, 0x33, 255)
     assert gui.downsample_display_image.getpixel((0, 0))[3] == 0
-    assert gui.process_status_var.value == "Added outline to 8 pixels with #112233. Press Undo to restore it."
+    assert gui.process_status_var.value == "Added pixel-perfect outline to 4 pixels with #112233. Press Undo to restore it."
     assert PixelFixGui._undo_palette_application(gui) is True
     assert gui.palette_display_image.getpixel((0, 0))[3] == 0
+
+
+def test_add_outline_from_selection_can_use_square_mode() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.downsample_result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000],
+            [0x000000, 0x778899, 0x000000],
+            [0x000000, 0x000000, 0x000000],
+        ],
+        stage="downsample",
+    )
+    gui.palette_result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000],
+            [0x000000, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000],
+        ],
+        stage="palette",
+    )
+    gui.transparent_colors = set()
+    gui.downsample_display_image = None
+    gui.palette_display_image = None
+    gui.image_state = "processed_current"
+    gui.last_successful_process_snapshot = {"stage": "downsample"}
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.session = SimpleNamespace(current=PreviewSettings())
+    gui.quick_compare_active = False
+    gui.view_var = SimpleNamespace(set=lambda _value: None)
+    gui.outline_pixel_perfect_var = SimpleNamespace(get=lambda: False)
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._displayed_palette = [0x112233]
+    gui._palette_selection_indices = {0}
+    gui._palette_selection_anchor_index = 0
+    gui._update_palette_strip = lambda: None
+    gui._update_image_info = lambda: None
+    gui.redraw_canvas = lambda: None
+    gui._schedule_state_persist = lambda: None
+    gui._refresh_action_states = lambda: None
+    gui._sync_controls_from_settings = lambda _settings: None
+    gui._clear_palette_undo_state = lambda: setattr(gui, "_palette_undo_state", None)
+    PixelFixGui._refresh_output_display_images(gui)
+
+    PixelFixGui._add_outline_from_selection(gui)
+
+    assert gui.palette_display_image.getpixel((0, 0)) == (0x11, 0x22, 0x33, 255)
+    assert gui.process_status_var.value == "Added outline to 8 pixels with #112233. Press Undo to restore it."
 
 
 def test_remove_outline_updates_output_and_undo_restores() -> None:
@@ -1383,6 +1514,7 @@ def test_remove_outline_updates_output_and_undo_restores() -> None:
     gui.session = SimpleNamespace(current=PreviewSettings())
     gui.quick_compare_active = False
     gui.view_var = SimpleNamespace(set=lambda _value: None)
+    gui.outline_pixel_perfect_var = SimpleNamespace(get=lambda: True)
     gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
     gui._update_palette_strip = lambda: updates.append("palette")
     gui._update_image_info = lambda: updates.append("image")
@@ -1395,12 +1527,19 @@ def test_remove_outline_updates_output_and_undo_restores() -> None:
 
     PixelFixGui._remove_outline(gui)
 
-    assert gui.palette_display_image.getpixel((1, 1))[3] == 0
+    assert gui.palette_display_image.getpixel((1, 1))[3] == 255
+    assert gui.palette_display_image.getpixel((2, 1))[3] == 0
     assert gui.palette_display_image.getpixel((2, 2))[3] == 255
     assert gui.downsample_display_image.getpixel((1, 1))[3] == 255
-    assert gui.process_status_var.value == "Removed 8 outline pixels. Press Undo to restore it."
+    assert gui.process_status_var.value == "Removed 4 pixel-perfect edge pixels. Press Undo to restore it."
     assert PixelFixGui._undo_palette_application(gui) is True
     assert gui.palette_display_image.getpixel((1, 1))[3] == 255
+
+
+def test_outline_pixel_perfect_enabled_defaults_true_without_gui_state() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+
+    assert PixelFixGui._outline_pixel_perfect_enabled(gui) is True
 
 
 def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> None:
