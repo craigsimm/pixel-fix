@@ -90,20 +90,27 @@ def apply_transparency_fill(result: ProcessResult, x: int, y: int) -> tuple[Proc
     return replace(result, alpha_mask=tuple(tuple(row) for row in next_mask)), changed
 
 
-def add_exterior_outline(result: ProcessResult, outline_label: int, *, transparent_labels: set[int] | None = None) -> tuple[ProcessResult, int]:
+def add_exterior_outline(
+    result: ProcessResult,
+    outline_label: int,
+    *,
+    transparent_labels: set[int] | None = None,
+    pixel_perfect: bool = True,
+) -> tuple[ProcessResult, int]:
     if result.width <= 0 or result.height <= 0:
         return result, 0
     visible = _effective_visible_mask(result, transparent_labels)
     exterior = _exterior_transparent_mask(visible)
+    outline_mask = _raw_exterior_outline_mask(visible, exterior)
+    if pixel_perfect:
+        outline_mask = _pixel_perfect_mask(outline_mask)
     outline_rgb = ((outline_label >> 16) & 0xFF, (outline_label >> 8) & 0xFF, outline_label & 0xFF)
     next_grid = [list(row) for row in result.grid]
     next_mask = [row[:] for row in visible]
     changed = 0
     for y in range(result.height):
         for x in range(result.width):
-            if visible[y][x] or not exterior[y][x]:
-                continue
-            if not _touches_visible_pixel(visible, x, y):
+            if not outline_mask[y][x]:
                 continue
             next_grid[y][x] = outline_rgb
             next_mask[y][x] = True
@@ -113,18 +120,24 @@ def add_exterior_outline(result: ProcessResult, outline_label: int, *, transpare
     return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), changed
 
 
-def remove_exterior_outline(result: ProcessResult, *, transparent_labels: set[int] | None = None) -> tuple[ProcessResult, int]:
+def remove_exterior_outline(
+    result: ProcessResult,
+    *,
+    transparent_labels: set[int] | None = None,
+    pixel_perfect: bool = True,
+) -> tuple[ProcessResult, int]:
     if result.width <= 0 or result.height <= 0:
         return result, 0
     visible = _effective_visible_mask(result, transparent_labels)
     exterior = _exterior_transparent_mask(visible)
+    remove_mask = _raw_exterior_edge_mask(visible, exterior)
+    if pixel_perfect:
+        remove_mask = _pixel_perfect_mask(remove_mask)
     next_mask = [row[:] for row in visible]
     changed = 0
     for y in range(result.height):
         for x in range(result.width):
-            if not visible[y][x]:
-                continue
-            if not _touches_exterior_space(exterior, x, y):
+            if not remove_mask[y][x]:
                 continue
             next_mask[y][x] = False
             changed += 1
@@ -145,6 +158,30 @@ def _effective_visible_mask(result: ProcessResult, transparent_labels: set[int] 
             visible_row.append(alpha_visible and label not in blocked)
         visible.append(visible_row)
     return visible
+
+
+def _raw_exterior_outline_mask(visible: list[list[bool]], exterior: list[list[bool]]) -> list[list[bool]]:
+    height = len(visible)
+    width = len(visible[0]) if height else 0
+    outline = [[False] * width for _ in range(height)]
+    for y in range(height):
+        for x in range(width):
+            if visible[y][x] or not exterior[y][x]:
+                continue
+            outline[y][x] = _touches_visible_pixel(visible, x, y)
+    return outline
+
+
+def _raw_exterior_edge_mask(visible: list[list[bool]], exterior: list[list[bool]]) -> list[list[bool]]:
+    height = len(visible)
+    width = len(visible[0]) if height else 0
+    edge = [[False] * width for _ in range(height)]
+    for y in range(height):
+        for x in range(width):
+            if not visible[y][x]:
+                continue
+            edge[y][x] = _touches_exterior_space(exterior, x, y)
+    return edge
 
 
 def _exterior_transparent_mask(visible: list[list[bool]]) -> list[list[bool]]:
@@ -194,6 +231,96 @@ def _touches_exterior_space(exterior: list[list[bool]], x: int, y: int) -> bool:
             if exterior[neighbor_y][neighbor_x]:
                 return True
     return x == 0 or y == 0 or x == width - 1 or y == height - 1
+
+
+def _pixel_perfect_mask(mask: list[list[bool]]) -> list[list[bool]]:
+    cleaned = [row[:] for row in mask]
+    height = len(cleaned)
+    width = len(cleaned[0]) if height else 0
+    if width == 0 or height == 0:
+        return cleaned
+    changed = True
+    while changed:
+        changed = False
+        for phase in range(2):
+            coordinates = [(x, y) for y in range(height) for x in range(width)]
+            if phase == 1:
+                coordinates.reverse()
+            phase_changed = False
+            for x, y in coordinates:
+                if not _pixel_perfect_candidate(cleaned, x, y, phase):
+                    continue
+                cleaned[y][x] = False
+                phase_changed = True
+            changed = changed or phase_changed
+    return cleaned
+
+
+def _pixel_perfect_candidate(mask: list[list[bool]], x: int, y: int, phase: int) -> bool:
+    if not mask[y][x]:
+        return False
+    north = y > 0 and mask[y - 1][x]
+    east = x + 1 < len(mask[0]) and mask[y][x + 1]
+    south = y + 1 < len(mask) and mask[y + 1][x]
+    west = x > 0 and mask[y][x - 1]
+    orthogonal = [north, east, south, west]
+    active_neighbors = 0
+    for neighbor_y in range(max(0, y - 1), min(len(mask), y + 2)):
+        for neighbor_x in range(max(0, x - 1), min(len(mask[0]), x + 2)):
+            if neighbor_x == x and neighbor_y == y:
+                continue
+            if mask[neighbor_y][neighbor_x]:
+                active_neighbors += 1
+    if active_neighbors < 2 or active_neighbors > 6:
+        return False
+    if sum(orthogonal) != 2:
+        return False
+    if (north and south) or (east and west):
+        return False
+    ring = orthogonal + [orthogonal[0]]
+    transitions = sum((not current) and following for current, following in zip(ring, ring[1:]))
+    if transitions != 1:
+        return False
+    if phase == 0:
+        if north and east and south:
+            return False
+        if east and south and west:
+            return False
+    else:
+        if north and east and west:
+            return False
+        if north and south and west:
+            return False
+    return _preserves_local_connectivity(mask, x, y)
+
+
+def _preserves_local_connectivity(mask: list[list[bool]], x: int, y: int) -> bool:
+    height = len(mask)
+    width = len(mask[0]) if height else 0
+    neighbors: list[tuple[int, int]] = []
+    for neighbor_y in range(max(0, y - 1), min(height, y + 2)):
+        for neighbor_x in range(max(0, x - 1), min(width, x + 2)):
+            if neighbor_x == x and neighbor_y == y:
+                continue
+            if mask[neighbor_y][neighbor_x]:
+                neighbors.append((neighbor_x, neighbor_y))
+    if len(neighbors) <= 1:
+        return True
+    allowed = set(neighbors)
+    pending = [neighbors[0]]
+    visited: set[tuple[int, int]] = set()
+    while pending:
+        point = pending.pop()
+        if point in visited:
+            continue
+        visited.add(point)
+        px, py = point
+        for neighbor_y in range(max(0, py - 1), min(height, py + 2)):
+            for neighbor_x in range(max(0, px - 1), min(width, px + 2)):
+                neighbor = (neighbor_x, neighbor_y)
+                if neighbor in allowed and neighbor not in visited:
+                    pending.append(neighbor)
+    return len(visited) == len(allowed)
 
 
 def _normalize_alpha_mask(mask: list[list[bool]]) -> tuple[tuple[bool, ...], ...] | None:

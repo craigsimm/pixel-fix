@@ -81,6 +81,7 @@ From one interface, you can:
 - Remove connected regions to transparency with the processed-image transparency picker.
 - Add a 1-pixel exterior outline around the current processed silhouette using one selected palette colour.
 - Remove a 1-pixel exterior outline by eroding the outside edge to transparency.
+- Toggle `Pixel Perfect` on the outline tools to bevel hard corners and avoid doubled edge pixels, or turn it off for square-corner behavior.
 - Use dithering when applying palettes:
   - `None`
   - `Ordered (Bayer)`
@@ -186,8 +187,10 @@ After a processed image exists, you can:
 - `Add Outline`
   - requires exactly one selected swatch in the current palette
   - adds a 1-pixel outline around the outside silhouette only
+  - defaults to `Pixel Perfect`, which chamfers hard corners to avoid doubled edges
 - `Remove Outline`
   - removes the outer inside edge of the current silhouette by making it transparent
+  - defaults to `Pixel Perfect`, which removes the cleaned edge mask instead of the full square ring
 
 These tools work through the processed image's per-pixel alpha mask, so saved PNGs preserve the transparency.
 
