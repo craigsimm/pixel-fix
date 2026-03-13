@@ -175,8 +175,19 @@ The `Select` menu lets you select colours in the current palette by:
 - low/high chroma
 - cool/warm temperature
 - hue buckets: red, yellow, green, cyan, blue, magenta
+- perceptual similarity to the current swatch selection
+
+Similarity selection helps prevent near-duplicate palette bloat by expanding your selection to swatches that are effectively the same colour family before you edit.
+
+For similarity cleanup, use this flow:
+
+1. Run the similarity select command from `Select`.
+2. Review the highlighted swatches in the `Current palette` strip.
+3. Click `Merge` to collapse the selected near-duplicates to one perceptual median colour.
+4. Click `Apply Palette` to update the processed image.
 
 The selection count is controlled by `Preferences > Selection Threshold`.
+For similarity selection, a lower `Selection Threshold` is stricter (only very close matches are selected), while a higher `Selection Threshold` is more permissive and includes less-similar swatches.
 
 #### Processed-image tools
 
