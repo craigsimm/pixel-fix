@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 import pixel_fix.gui.app as app_module
 from pixel_fix.gui.app import PaletteUndoState, PixelFixGui
@@ -17,10 +18,24 @@ from pixel_fix.gui.processing import (
 )
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.palette.advanced import generate_structured_palette
-from pixel_fix.palette.sort import PALETTE_SELECT_LIGHTNESS_DARK, PALETTE_SORT_HUE, PALETTE_SORT_LIGHTNESS
+from pixel_fix.palette.sort import (
+    PALETTE_SELECT_LABELS,
+    PALETTE_SELECT_LIGHTNESS_DARK,
+    PALETTE_SELECT_MODES,
+    PALETTE_SORT_HUE,
+    PALETTE_SORT_LIGHTNESS,
+)
 from pixel_fix.palette.workspace import ColorWorkspace
 from pixel_fix.pipeline import PipelineConfig, PipelinePreparedResult
 
+
+
+
+def _similarity_selection_mode() -> str:
+    for mode in PALETTE_SELECT_MODES:
+        if "similar" in mode or "duplicate" in mode:
+            return mode
+    pytest.skip("Similarity palette selection mode is not available in this build.")
 
 def _sample_grid():
     return [
@@ -1204,6 +1219,30 @@ def test_select_current_palette_replaces_selection_using_displayed_palette() -> 
     assert gui.process_status_var.value == "Selected 2 palette colours by Lightness (Dark) at 30%."
     assert updates == ["reset", "palette", "refresh"]
 
+
+
+
+def test_select_current_palette_similarity_mode_updates_selection_and_status_text() -> None:
+    updates: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.workspace = ColorWorkspace()
+    gui.selection_threshold_var = SimpleNamespace(get=lambda: 50)
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._get_display_palette = lambda: ([0x101010, 0x111111, 0x80FF00, 0x80FE00, 0xB040A0], "Generated")
+    gui._palette_selection_indices = {4}
+    gui._palette_selection_anchor_index = 4
+    gui._reset_palette_ctrl_drag_state = lambda: updates.append("reset")
+    gui._update_palette_strip = lambda: updates.append("palette")
+    gui._refresh_action_states = lambda: updates.append("refresh")
+
+    mode = _similarity_selection_mode()
+
+    PixelFixGui.select_current_palette(gui, mode)
+
+    assert gui._palette_selection_indices == {0, 1, 2}
+    assert gui._palette_selection_anchor_index == 0
+    assert gui.process_status_var.value == f"Selected 3 palette colours by {PALETTE_SELECT_LABELS[mode]} at 50%."
+    assert updates == ["reset", "palette", "refresh"]
 
 def test_selection_threshold_change_persists_without_marking_output_stale() -> None:
     messages: list[str] = []
