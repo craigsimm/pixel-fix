@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 import pixel_fix.gui.app as app_module
 from pixel_fix.gui.app import PaletteUndoState, PixelFixGui
@@ -17,10 +18,24 @@ from pixel_fix.gui.processing import (
 )
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.palette.advanced import generate_structured_palette
-from pixel_fix.palette.sort import PALETTE_SELECT_LIGHTNESS_DARK, PALETTE_SORT_HUE, PALETTE_SORT_LIGHTNESS
+from pixel_fix.palette.sort import (
+    PALETTE_SELECT_LABELS,
+    PALETTE_SELECT_LIGHTNESS_DARK,
+    PALETTE_SELECT_MODES,
+    PALETTE_SORT_HUE,
+    PALETTE_SORT_LIGHTNESS,
+)
 from pixel_fix.palette.workspace import ColorWorkspace
 from pixel_fix.pipeline import PipelineConfig, PipelinePreparedResult
 
+
+
+
+def _similarity_selection_mode() -> str:
+    for mode in PALETTE_SELECT_MODES:
+        if "similar" in mode or "duplicate" in mode:
+            return mode
+    pytest.skip("Similarity palette selection mode is not available in this build.")
 
 def _sample_grid():
     return [
@@ -422,6 +437,138 @@ def test_remove_exterior_outline_can_erase_one_pixel_wide_shape() -> None:
         (False, False, False),
         (False, False, False),
     )
+
+
+def _require_brush_processing_api() -> None:
+    required = [
+        "brush_footprint",
+        "apply_pencil_operation",
+        "apply_eraser_operation",
+    ]
+    missing = [name for name in required if not hasattr(app_module, name)]
+    if missing:
+        pytest.skip(f"Brush-processing API is not available in this build: {', '.join(missing)}")
+
+
+def test_brush_api_square_and_round_footprints_vary_by_width() -> None:
+    _require_brush_processing_api()
+
+    square_w1 = set(app_module.brush_footprint(width=1, shape="square"))
+    square_w3 = set(app_module.brush_footprint(width=3, shape="square"))
+    round_w1 = set(app_module.brush_footprint(width=1, shape="round"))
+    round_w3 = set(app_module.brush_footprint(width=3, shape="round"))
+
+    assert square_w1 == {(0, 0)}
+    assert round_w1 == {(0, 0)}
+    assert len(square_w3) > len(square_w1)
+    assert len(round_w3) > len(round_w1)
+    assert round_w3 != square_w3
+
+
+def test_brush_api_pencil_and_eraser_apply_expected_alpha_changes() -> None:
+    _require_brush_processing_api()
+
+    result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000],
+            [0x000000, 0x000000, 0x000000],
+            [0x000000, 0x000000, 0x000000],
+        ]
+    )
+    result = ProcessResult(
+        grid=result.grid,
+        width=result.width,
+        height=result.height,
+        stats=result.stats,
+        prepared_input=result.prepared_input,
+        alpha_mask=((False, False, False), (False, False, False), (False, False, False)),
+    )
+
+    painted, painted_changed = app_module.apply_pencil_operation(
+        result,
+        x=1,
+        y=1,
+        label=0xAABBCC,
+        width=1,
+        shape="square",
+    )
+    assert painted_changed == 1
+    assert painted.grid[1][1] == (0xAA, 0xBB, 0xCC)
+    assert painted.alpha_mask is not None
+    assert painted.alpha_mask[1][1] is True
+
+    erased, erased_changed = app_module.apply_eraser_operation(painted, x=1, y=1, width=1, shape="square")
+    assert erased_changed == 1
+    assert erased.alpha_mask is not None
+    assert erased.alpha_mask[1][1] is False
+
+
+def test_brush_api_no_op_cases_report_zero_changed() -> None:
+    _require_brush_processing_api()
+
+    result = _result_from_labels([[0x112233]])
+    no_paint, changed = app_module.apply_pencil_operation(result, x=-1, y=-1, label=0xFFFFFF, width=1, shape="square")
+    assert changed == 0
+    assert no_paint is result
+
+    no_erase, changed = app_module.apply_eraser_operation(result, x=-1, y=-1, width=1, shape="round")
+    assert changed == 0
+    assert no_erase is result
+
+
+def _require_brush_gui_api() -> None:
+    required = ["_on_canvas_press", "_on_canvas_drag", "_on_canvas_release"]
+    if any(not hasattr(PixelFixGui, name) for name in required) or not hasattr(PixelFixGui, "_apply_brush_stroke"):
+        pytest.skip("GUI brush interaction API is not available in this build")
+
+
+def test_gui_brush_drag_interpolates_without_holes() -> None:
+    _require_brush_gui_api()
+
+    applied: list[tuple[int, int]] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.dragging = False
+    gui._display_context = object()
+    gui.canvas = SimpleNamespace(configure=lambda **_kwargs: None, winfo_width=lambda: 64, winfo_height=lambda: 64)
+    gui.redraw_canvas = lambda: None
+    gui._point_is_over_image = lambda *_args, **_kwargs: True
+    gui._preview_image_coordinates = lambda x, y, **_kwargs: (x, y)
+    gui._cursor_for_pointer = lambda: ""
+    gui._apply_brush_stroke = lambda x, y, *_args, **_kwargs: applied.append((x, y))
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=1, y=1))
+    PixelFixGui._on_canvas_drag(gui, SimpleNamespace(x=4, y=1))
+    PixelFixGui._on_canvas_release(gui, SimpleNamespace())
+
+    xs = sorted({x for x, y in applied if y == 1})
+    assert xs == list(range(min(xs), max(xs) + 1))
+
+
+def test_gui_brush_stroke_captures_single_undo_for_press_drag_release() -> None:
+    _require_brush_gui_api()
+
+    calls: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.dragging = False
+    gui._display_context = object()
+    gui.canvas = SimpleNamespace(configure=lambda **_kwargs: None, winfo_width=lambda: 64, winfo_height=lambda: 64)
+    gui.redraw_canvas = lambda: None
+    gui._point_is_over_image = lambda *_args, **_kwargs: True
+    gui._preview_image_coordinates = lambda x, y, **_kwargs: (x, y)
+    gui._cursor_for_pointer = lambda: ""
+    gui._apply_brush_stroke = lambda *_args, **_kwargs: None
+    gui._capture_palette_undo_state = lambda: calls.append("capture")
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=1, y=1))
+    PixelFixGui._on_canvas_drag(gui, SimpleNamespace(x=3, y=1))
+    PixelFixGui._on_canvas_drag(gui, SimpleNamespace(x=5, y=1))
+    PixelFixGui._on_canvas_release(gui, SimpleNamespace())
+
+    assert calls == ["capture"]
 
 
 def test_undo_palette_application_restores_previous_preview_state() -> None:
@@ -1222,6 +1369,30 @@ def test_select_current_palette_replaces_selection_using_displayed_palette() -> 
     assert gui.process_status_var.value == "Selected 2 palette colours by Lightness (Dark) at 30%."
     assert updates == ["reset", "palette", "refresh"]
 
+
+
+
+def test_select_current_palette_similarity_mode_updates_selection_and_status_text() -> None:
+    updates: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.workspace = ColorWorkspace()
+    gui.selection_threshold_var = SimpleNamespace(get=lambda: 50)
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._get_display_palette = lambda: ([0x101010, 0x111111, 0x80FF00, 0x80FE00, 0xB040A0], "Generated")
+    gui._palette_selection_indices = {4}
+    gui._palette_selection_anchor_index = 4
+    gui._reset_palette_ctrl_drag_state = lambda: updates.append("reset")
+    gui._update_palette_strip = lambda: updates.append("palette")
+    gui._refresh_action_states = lambda: updates.append("refresh")
+
+    mode = _similarity_selection_mode()
+
+    PixelFixGui.select_current_palette(gui, mode)
+
+    assert gui._palette_selection_indices == {0, 1, 2}
+    assert gui._palette_selection_anchor_index == 0
+    assert gui.process_status_var.value == f"Selected 3 palette colours by {PALETTE_SELECT_LABELS[mode]} at 50%."
+    assert updates == ["reset", "palette", "refresh"]
 
 def test_selection_threshold_change_persists_without_marking_output_stale() -> None:
     messages: list[str] = []
