@@ -20,6 +20,15 @@ class PreviewSettings:
     output_mode: str = "rgba"
     quantizer: str = "median-cut"
     dither_mode: str = "none"
+<<<<<<< ours
+    paint_tool: str = "pan"
+    brush_width: int = 1
+    brush_shape: str = "square"
+=======
+    cleanup_tool: str = "none"
+    cleanup_brush_width: int = 1
+    cleanup_brush_shape: str = "square"
+>>>>>>> theirs
 
 
 class UndoHistory:

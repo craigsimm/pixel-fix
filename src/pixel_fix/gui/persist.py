@@ -28,6 +28,15 @@ SETTING_LABELS = {
     "output_mode": "Output mode",
     "quantizer": "Palette reduction method",
     "dither_mode": "Dithering",
+<<<<<<< ours
+    "paint_tool": "Paint tool",
+    "brush_width": "Brush width",
+    "brush_shape": "Brush shape",
+=======
+    "cleanup_tool": "Cleanup tool",
+    "cleanup_brush_width": "Cleanup brush width",
+    "cleanup_brush_shape": "Cleanup brush shape",
+>>>>>>> theirs
     "palette_size": "Palette size",
     "palette_source": "Palette source",
     "palette_path": "Palette path",
@@ -72,6 +81,15 @@ def serialize_settings(settings: PreviewSettings) -> dict[str, Any]:
         "output_mode": settings.output_mode,
         "quantizer": settings.quantizer,
         "dither_mode": settings.dither_mode,
+<<<<<<< ours
+        "paint_tool": settings.paint_tool,
+        "brush_width": settings.brush_width,
+        "brush_shape": settings.brush_shape,
+=======
+        "cleanup_tool": settings.cleanup_tool,
+        "cleanup_brush_width": settings.cleanup_brush_width,
+        "cleanup_brush_shape": settings.cleanup_brush_shape,
+>>>>>>> theirs
     }
 
 
@@ -94,6 +112,15 @@ def deserialize_settings(data: dict[str, Any] | None) -> PreviewSettings:
         output_mode=str(data.get("output_mode", "rgba")),
         quantizer=_coerce_palette_reduction_method(data.get("quantizer", "median-cut")),
         dither_mode=str(data.get("dither_mode", "none")),
+<<<<<<< ours
+        paint_tool=_coerce_paint_tool(data.get("paint_tool", "pan")),
+        brush_width=_coerce_brush_width(data.get("brush_width", 1)),
+        brush_shape=_coerce_brush_shape(data.get("brush_shape", "square")),
+=======
+        cleanup_tool=_coerce_cleanup_tool(data.get("cleanup_tool", "none")),
+        cleanup_brush_width=_coerce_cleanup_brush_width(data.get("cleanup_brush_width", 1)),
+        cleanup_brush_shape=_coerce_cleanup_brush_shape(data.get("cleanup_brush_shape", "square")),
+>>>>>>> theirs
     )
 
 
@@ -239,6 +266,46 @@ def _coerce_palette_reduction_method(value: Any) -> str:
     return "median-cut"
 
 
+<<<<<<< ours
+
+
+def _coerce_paint_tool(value: Any) -> str:
+    parsed = str(value or "pan").strip().lower()
+    if parsed in {"none", "pan"}:
+        return "pan"
+    if parsed in {"pencil", "eraser"}:
+        return parsed
+    return "pan"
+
+
+def _coerce_brush_width(value: Any) -> int:
+    return max(1, min(64, _as_int(value, 1)))
+
+
+def _coerce_brush_shape(value: Any) -> str:
+=======
+def _coerce_cleanup_brush_width(value: Any) -> int:
+    return max(1, min(64, _as_int(value, 1)))
+
+
+def _coerce_cleanup_brush_shape(value: Any) -> str:
+>>>>>>> theirs
+    parsed = str(value or "square").strip().lower()
+    if parsed in {"square", "round"}:
+        return parsed
+    return "square"
+
+<<<<<<< ours
+=======
+
+def _coerce_cleanup_tool(value: Any) -> str:
+    parsed = str(value or "none").strip().lower()
+    if parsed in {"none", "pencil", "eraser"}:
+        return parsed
+    return "none"
+
+
+>>>>>>> theirs
 def coerce_selection_threshold(value: Any) -> int:
     parsed = _as_int(value, 30)
     allowed = tuple(range(10, 101, 10))

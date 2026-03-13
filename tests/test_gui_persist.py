@@ -30,6 +30,9 @@ def test_settings_roundtrip() -> None:
         output_mode="indexed",
         quantizer="median-cut",
         dither_mode="ordered",
+        cleanup_tool="pencil",
+        cleanup_brush_width=5,
+        cleanup_brush_shape="round",
     )
 
     restored = deserialize_settings(serialize_settings(settings))
@@ -49,6 +52,9 @@ def test_default_settings_use_manual_pixel_size() -> None:
     assert settings.palette_contrast == 100
     assert settings.palette_hue == 0
     assert settings.palette_saturation == 100
+    assert settings.cleanup_tool == "none"
+    assert settings.cleanup_brush_width == 1
+    assert settings.cleanup_brush_shape == "square"
 
 
 def test_diff_snapshots_uses_friendly_messages() -> None:
@@ -67,6 +73,9 @@ def test_diff_snapshots_uses_friendly_messages() -> None:
             palette_saturation=140,
             palette_dither_mode="blue-noise",
             quantizer="kmeans",
+            cleanup_tool="eraser",
+            cleanup_brush_width=3,
+            cleanup_brush_shape="round",
         ),
         [0x000000, 0xFFFFFF],
         "palette.json",
@@ -87,6 +96,9 @@ def test_diff_snapshots_uses_friendly_messages() -> None:
     assert "Palette saturation: 100 > 140" in changes
     assert "Palette reduction method: median-cut > kmeans" in changes
     assert "Dithering method: none > blue-noise" in changes
+    assert "Cleanup tool: none > eraser" in changes
+    assert "Cleanup brush width: 1 > 3" in changes
+    assert "Cleanup brush shape: square > round" in changes
     assert "Palette size: 0 > 2" in changes
     assert "Palette source: none > Built-in: Example / DB16" in changes
     assert "Palette path: none > palette.json" in changes
@@ -106,6 +118,9 @@ def test_deserialize_settings_clamps_advanced_palette_controls() -> None:
             "palette_saturation": 999,
             "quantizer": "topk",
             "palette_dither_mode": "ordered",
+            "cleanup_tool": "PAN",
+            "cleanup_brush_width": 0,
+            "cleanup_brush_shape": "circle",
         }
     )
 
@@ -120,6 +135,9 @@ def test_deserialize_settings_clamps_advanced_palette_controls() -> None:
     assert restored.palette_saturation == 200
     assert restored.quantizer == "median-cut"
     assert restored.palette_dither_mode == "ordered"
+    assert restored.cleanup_tool == "none"
+    assert restored.cleanup_brush_width == 1
+    assert restored.cleanup_brush_shape == "square"
 
 
 def test_diff_snapshots_reports_no_changes() -> None:
@@ -164,3 +182,15 @@ def test_append_process_log_writes_timestamped_entry(tmp_path: Path, monkeypatch
     assert "Source: example.png" in text
     assert "Processed size: 32x32" in text
     assert "- Resize method: nearest > bilinear" in text
+
+
+def test_deserialize_settings_normalizes_cleanup_controls() -> None:
+    restored = deserialize_settings({
+        "cleanup_tool": "PENCIL",
+        "cleanup_brush_width": 999,
+        "cleanup_brush_shape": "ROUND",
+    })
+
+    assert restored.cleanup_tool == "pencil"
+    assert restored.cleanup_brush_width == 64
+    assert restored.cleanup_brush_shape == "round"

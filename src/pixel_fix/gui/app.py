@@ -118,6 +118,8 @@ DITHER_DISPLAY_TO_VALUE = {label: value for (label, value) in DITHER_OPTIONS}
 DITHER_VALUE_TO_DISPLAY = {value: label for (label, value) in DITHER_OPTIONS}
 COLOR_MODE_DISPLAY_TO_VALUE = {label: value for (label, value) in COLOR_MODE_OPTIONS}
 COLOR_MODE_VALUE_TO_DISPLAY = {value: label for (label, value) in COLOR_MODE_OPTIONS}
+PAINT_TOOL_OPTIONS = (("Pencil", "pencil"), ("Eraser", "eraser"), ("Pan/None", "pan"))
+BRUSH_SHAPE_OPTIONS = (("Square", "square"), ("Round", "round"))
 
 
 @dataclass
@@ -219,6 +221,9 @@ class PixelFixGui:
         self._persist_after_id: str | None = None
         self._suspend_control_events = False
         self._palette_undo_state: PaletteUndoState | None = None
+        self._paint_stroke_active = False
+        self._paint_stroke_changed = 0
+        self._paint_last_point: tuple[int, int] | None = None
 
         self.view_var = tk.StringVar(value=str(persisted.get("view_mode", "original")))
         if self.view_var.get() not in {"original", "processed"}:
@@ -239,7 +244,25 @@ class PixelFixGui:
         self.output_mode_var = tk.StringVar()
         self.quantizer_var = tk.StringVar()
         self.dither_var = tk.StringVar()
+        self.paint_tool_var = tk.StringVar()
+        self.brush_width_var = tk.IntVar(value=1)
+        self.brush_shape_var = tk.StringVar()
         self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
+<<<<<<< ours
+=======
+        self.outline_pixel_perfect_var = tk.BooleanVar(value=bool(persisted.get("outline_pixel_perfect", True)))
+<<<<<<< ours
+        self.outline_adaptive_var = tk.BooleanVar(value=bool(persisted.get("outline_adaptive", False)))
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+        self.outline_brightness_threshold_enabled_var = tk.BooleanVar(
+            value=bool(persisted.get("outline_brightness_threshold_enabled", False))
+        )
+        self.outline_brightness_threshold_var = tk.IntVar(value=int(persisted.get("outline_brightness_threshold", 80)))
+>>>>>>> theirs
         self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
         self.scale_info_var = tk.StringVar(value="Open an image to set the pixel size.")
         self.key_colors_label_var = tk.StringVar(value="Key colours (0)")
@@ -481,6 +504,85 @@ class PixelFixGui:
         self.remove_outline_button = ttk.Button(outline_row, text="Remove Outline", command=self._remove_outline)
         self.remove_outline_button.pack(side=tk.LEFT, padx=(6, 0))
 
+        paint_tools_row = ttk.Frame(palette_section)
+        paint_tools_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(paint_tools_row, text="Tool").pack(side=tk.LEFT)
+        self.paint_tool_buttons: list[ttk.Radiobutton] = []
+        for label, value in PAINT_TOOL_OPTIONS:
+            button = ttk.Radiobutton(
+                paint_tools_row,
+                text=label,
+                value=value,
+                variable=self.paint_tool_var,
+                command=self._on_settings_changed,
+            )
+            button.pack(side=tk.LEFT, padx=(8, 0))
+            self.paint_tool_buttons.append(button)
+
+        brush_row = ttk.Frame(palette_section)
+        brush_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(brush_row, text="Brush width").pack(side=tk.LEFT)
+        self.brush_width_spinbox = ttk.Spinbox(
+            brush_row,
+            from_=1,
+            to=64,
+            textvariable=self.brush_width_var,
+            width=5,
+            command=self._on_settings_changed,
+        )
+        self.brush_width_spinbox.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(brush_row, text="Shape").pack(side=tk.LEFT, padx=(10, 0))
+        self.brush_shape_combo = ttk.Combobox(
+            brush_row,
+            state="readonly",
+            values=[label for (label, _value) in BRUSH_SHAPE_OPTIONS],
+            width=8,
+            textvariable=self.brush_shape_var,
+        )
+<<<<<<< ours
+        self.brush_shape_combo.pack(side=tk.LEFT, padx=(6, 0))
+        self.brush_shape_combo.bind("<<ComboboxSelected>>", self._on_settings_changed, add="+")
+=======
+        self.outline_pixel_perfect_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_adaptive_toggle = ttk.Checkbutton(
+            outline_row,
+<<<<<<< ours
+            text="Adaptive Colour",
+            variable=self.outline_adaptive_var,
+            command=self._on_outline_adaptive_changed,
+        )
+        self.outline_adaptive_toggle.pack(side=tk.LEFT, padx=(10, 0))
+>>>>>>> theirs
+=======
+            text="Adaptive",
+            variable=self.outline_adaptive_var,
+            command=self._on_outline_pixel_perfect_changed,
+        )
+<<<<<<< ours
+        self.outline_adaptive_toggle.pack(side=tk.LEFT, padx=(10, 0))
+>>>>>>> theirs
+=======
+        self.outline_pixel_perfect_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_brightness_threshold_toggle = ttk.Checkbutton(
+            outline_row,
+            text="Brightness ≤",
+            variable=self.outline_brightness_threshold_enabled_var,
+            command=self._on_outline_brightness_threshold_changed,
+        )
+        self.outline_brightness_threshold_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_brightness_threshold_spinbox = tk.Spinbox(
+            outline_row,
+            from_=0,
+            to=255,
+            textvariable=self.outline_brightness_threshold_var,
+            width=4,
+            command=self._on_outline_brightness_threshold_changed,
+        )
+        self.outline_brightness_threshold_spinbox.pack(side=tk.LEFT, padx=(4, 0))
+        self.outline_brightness_threshold_spinbox.bind("<FocusOut>", self._on_outline_brightness_threshold_changed)
+        self._sync_outline_brightness_threshold_state()
+>>>>>>> theirs
+
         adjust_section = self._create_section(sidebar, "4. Adjust palette")
         self.palette_adjustment_controls: list[tk.Scale] = []
         self.palette_brightness_scale = self._create_palette_adjustment_row(
@@ -585,6 +687,9 @@ class PixelFixGui:
         self.palette_reduction_spinbox.bind("<KeyRelease>", self._on_settings_changed, add="+")
         self.palette_reduction_spinbox.bind("<<Increment>>", self._on_settings_changed, add="+")
         self.palette_reduction_spinbox.bind("<<Decrement>>", self._on_settings_changed, add="+")
+        self.brush_width_spinbox.bind("<KeyRelease>", self._on_settings_changed, add="+")
+        self.brush_width_spinbox.bind("<<Increment>>", self._on_settings_changed, add="+")
+        self.brush_width_spinbox.bind("<<Decrement>>", self._on_settings_changed, add="+")
 
         self._configure_primary_button(self.downsample_button)
         self._configure_primary_button(self.reduce_palette_button)
@@ -1461,6 +1566,58 @@ class PixelFixGui:
             return None
         return displayed[selected[0]]
 
+<<<<<<< ours
+=======
+    def _outline_pixel_perfect_enabled(self) -> bool:
+        variable = getattr(self, "outline_pixel_perfect_var", None)
+        if variable is None:
+            return True
+        getter = getattr(variable, "get", None)
+        if callable(getter):
+            return bool(getter())
+        return bool(variable)
+
+<<<<<<< ours
+    def _outline_adaptive_enabled(self) -> bool:
+        variable = getattr(self, "outline_adaptive_var", None)
+=======
+    def _outline_brightness_threshold_enabled(self) -> bool:
+        variable = getattr(self, "outline_brightness_threshold_enabled_var", None)
+>>>>>>> theirs
+        if variable is None:
+            return False
+        getter = getattr(variable, "get", None)
+        if callable(getter):
+            return bool(getter())
+        return bool(variable)
+
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+    def _outline_brightness_threshold_value(self) -> int:
+        variable = getattr(self, "outline_brightness_threshold_var", None)
+        default = 80
+        if variable is None:
+            return default
+        getter = getattr(variable, "get", None)
+        if callable(getter):
+            value = getter()
+        else:
+            value = variable
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            numeric = default
+        clamped = max(0, min(255, numeric))
+        setter = getattr(variable, "set", None)
+        if callable(setter):
+            setter(clamped)
+        return clamped
+
+>>>>>>> theirs
     def _set_current_output_result(self, result: ProcessResult) -> None:
         if getattr(self, "palette_result", None) is not None:
             self.palette_result = result
@@ -1471,22 +1628,90 @@ class PixelFixGui:
         current = self._current_output_result()
         if current is None or self.image_state == "processing":
             return
+<<<<<<< ours
+<<<<<<< ours
+=======
+        adaptive = self._outline_adaptive_enabled()
+>>>>>>> theirs
         outline_label = self._selected_palette_outline_label()
-        if outline_label is None:
+        if outline_label is None and not adaptive:
             self.process_status_var.set("Select exactly one palette colour to add an outline.")
             return
+<<<<<<< ours
         updated, changed = add_exterior_outline(current, outline_label, transparent_labels=getattr(self, "transparent_colors", set()))
         if changed <= 0:
             self.process_status_var.set("No exterior outline pixels were available to add.")
+=======
+        adaptive = self._outline_adaptive_enabled()
+        outline_label: int | None = 0
+        if not adaptive:
+            outline_label = self._selected_palette_outline_label()
+            if outline_label is None:
+                self.process_status_var.set("Select exactly one palette colour to add an outline.")
+                return
+=======
+        if outline_label is None:
+            outline_label = 0
+>>>>>>> theirs
+        pixel_perfect = self._outline_pixel_perfect_enabled()
+        updated, changed = add_exterior_outline(
+            current,
+            outline_label if outline_label is not None else 0,
+            transparent_labels=getattr(self, "transparent_colors", set()),
+            pixel_perfect=pixel_perfect,
+            adaptive=adaptive,
+        )
+        if changed <= 0:
+            if adaptive:
+                if pixel_perfect:
+                    self.process_status_var.set("No adaptive pixel-perfect exterior outline pixels were available to add.")
+                else:
+                    self.process_status_var.set("No adaptive exterior outline pixels were available to add.")
+            elif pixel_perfect:
+                self.process_status_var.set("No pixel-perfect exterior outline pixels were available to add.")
+            else:
+                self.process_status_var.set("No exterior outline pixels were available to add.")
+>>>>>>> theirs
             return
         self._capture_palette_undo_state()
         self.transparent_colors = set()
         self._set_current_output_result(updated)
         self._refresh_output_display_images()
         self._set_view("processed")
+<<<<<<< ours
+<<<<<<< ours
         self.process_status_var.set(
             f"Added outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
         )
+=======
+        if adaptive:
+            if pixel_perfect:
+                self.process_status_var.set(
+                    f"Added adaptive pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                )
+            else:
+                self.process_status_var.set(
+                    f"Added adaptive outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                )
+=======
+        if adaptive and pixel_perfect:
+            self.process_status_var.set(
+                f"Added adaptive pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+            )
+        elif adaptive:
+            self.process_status_var.set(
+                f"Added adaptive outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+            )
+>>>>>>> theirs
+        elif pixel_perfect:
+            self.process_status_var.set(
+                f"Added pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
+            )
+        else:
+            self.process_status_var.set(
+                f"Added outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
+            )
+>>>>>>> theirs
         self._update_palette_strip()
         self._update_image_info()
         self.redraw_canvas()
@@ -1496,16 +1721,57 @@ class PixelFixGui:
         current = self._current_output_result()
         if current is None or self.image_state == "processing":
             return
+<<<<<<< ours
         updated, changed = remove_exterior_outline(current, transparent_labels=getattr(self, "transparent_colors", set()))
         if changed <= 0:
             self.process_status_var.set("No exterior outline pixels were found to remove.")
+=======
+        pixel_perfect = self._outline_pixel_perfect_enabled()
+        brightness_threshold = self._outline_brightness_threshold_value() if self._outline_brightness_threshold_enabled() else None
+        updated, changed = remove_exterior_outline(
+            current,
+            transparent_labels=getattr(self, "transparent_colors", set()),
+            pixel_perfect=pixel_perfect,
+            brightness_threshold=brightness_threshold,
+        )
+        if changed <= 0:
+            if brightness_threshold is not None and pixel_perfect:
+                self.process_status_var.set(
+                    f"No pixel-perfect edge pixels met brightness ≤ {brightness_threshold} for removal."
+                )
+            elif brightness_threshold is not None:
+                self.process_status_var.set(
+                    f"No exterior outline pixels met brightness ≤ {brightness_threshold} for removal."
+                )
+            elif pixel_perfect:
+                self.process_status_var.set("No pixel-perfect edge pixels were found to remove.")
+            else:
+                self.process_status_var.set("No exterior outline pixels were found to remove.")
+>>>>>>> theirs
             return
         self._capture_palette_undo_state()
         self.transparent_colors = set()
         self._set_current_output_result(updated)
         self._refresh_output_display_images()
         self._set_view("processed")
+<<<<<<< ours
         self.process_status_var.set(f"Removed {changed} outline pixel{'s' if changed != 1 else ''}. Press Undo to restore it.")
+=======
+        if pixel_perfect and brightness_threshold is not None:
+            self.process_status_var.set(
+                f"Removed {changed} pixel-perfect edge pixel{'s' if changed != 1 else ''} at brightness ≤ {brightness_threshold}. Press Undo to restore it."
+            )
+        elif pixel_perfect:
+            self.process_status_var.set(
+                f"Removed {changed} pixel-perfect edge pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+            )
+        elif brightness_threshold is not None:
+            self.process_status_var.set(
+                f"Removed {changed} outline pixel{'s' if changed != 1 else ''} at brightness ≤ {brightness_threshold}. Press Undo to restore it."
+            )
+        else:
+            self.process_status_var.set(f"Removed {changed} outline pixel{'s' if changed != 1 else ''}. Press Undo to restore it.")
+>>>>>>> theirs
         self._update_palette_strip()
         self._update_image_info()
         self.redraw_canvas()
@@ -2017,13 +2283,139 @@ class PixelFixGui:
         target = settings.palette_reduction_colors
         return max(1, min(target, unique_count))
 
+    def _active_paint_tool(self) -> str:
+        current = getattr(getattr(self, "session", None), "current", None)
+        tool = str(getattr(current, "paint_tool", "pan") or "pan").strip().lower()
+        if tool in {"none", "pan"}:
+            return "pan"
+        if tool in {"pencil", "eraser"}:
+            return tool
+        return "pan"
+
+    def _painting_enabled(self) -> bool:
+        view_var = getattr(self, "view_var", None)
+        view = view_var.get() if view_var is not None and hasattr(view_var, "get") else "original"
+        return getattr(self, "image_state", None) != "processing" and view == "processed" and self._current_output_result() is not None
+
+    def _selected_paint_label(self) -> int | None:
+        return self._selected_palette_outline_label()
+
+    @staticmethod
+    def _iter_line_points(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+        x0, y0 = start
+        x1, y1 = end
+        dx = x1 - x0
+        dy = y1 - y0
+        steps = max(abs(dx), abs(dy))
+        if steps <= 0:
+            return [(x0, y0)]
+        return [
+            (int(round(x0 + (dx * step) / steps)), int(round(y0 + (dy * step) / steps)))
+            for step in range(steps + 1)
+        ]
+
+    def _iter_brush_offsets(self, width: int, shape: str) -> list[tuple[int, int]]:
+        radius = max(0, int(width) - 1)
+        offsets: list[tuple[int, int]] = []
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if shape == "round" and (dx * dx + dy * dy) > (radius * radius):
+                    continue
+                offsets.append((dx, dy))
+        return offsets or [(0, 0)]
+
+    def _paint_stamp(
+        self,
+        grid: RGBGrid,
+        alpha_mask: list[list[bool]],
+        x: int,
+        y: int,
+        *,
+        tool: str,
+        label: int | None,
+        width: int,
+        shape: str,
+    ) -> int:
+        changed = 0
+        height = len(grid)
+        canvas_width = len(grid[0]) if height else 0
+        for dx, dy in self._iter_brush_offsets(width, shape):
+            px = x + dx
+            py = y + dy
+            if px < 0 or py < 0 or px >= canvas_width or py >= height:
+                continue
+            if tool == "eraser":
+                if not alpha_mask[py][px]:
+                    continue
+                alpha_mask[py][px] = False
+                changed += 1
+                continue
+            if label is None:
+                continue
+            after = ((label >> 16) & 0xFF, (label >> 8) & 0xFF, label & 0xFF)
+            if grid[py][px] == after and alpha_mask[py][px]:
+                continue
+            grid[py][px] = after
+            alpha_mask[py][px] = True
+            changed += 1
+        return changed
+
+    def _apply_paint_at_canvas_point(self, canvas_x: int, canvas_y: int, *, tool: str, label: int | None) -> int:
+        result = self._current_output_result()
+        if result is None:
+            return 0
+        point = self._preview_image_coordinates(canvas_x, canvas_y, view="processed")
+        if point is None:
+            return 0
+        width = max(1, min(64, int(self.session.current.brush_width)))
+        shape = str(self.session.current.brush_shape or "square").lower()
+        if shape not in {"square", "round"}:
+            shape = "square"
+        points = [point]
+        if self._paint_last_point is not None:
+            points = self._iter_line_points(self._paint_last_point, point)
+        grid = [list(row) for row in result.grid]
+        alpha_mask = [list(row) for row in result.alpha_mask] if result.alpha_mask is not None else [[True] * result.width for _ in range(result.height)]
+        changed = 0
+        for px, py in points:
+            changed += self._paint_stamp(grid, alpha_mask, px, py, tool=tool, label=label, width=width, shape=shape)
+        self._paint_last_point = point
+        if changed > 0:
+            updated = replace(result, grid=grid, alpha_mask=tuple(tuple(row) for row in alpha_mask))
+            self._set_current_output_result(updated)
+            self._refresh_output_display_images()
+            self._set_view("processed")
+            self.redraw_canvas()
+            self._update_palette_strip()
+            self._update_image_info()
+        return changed
+
     def _on_canvas_press(self, event: tk.Event) -> None:
+<<<<<<< ours
         if self.key_color_pick_mode:
             sampled = self._sample_label_from_preview(event.x, event.y, view="original")
             if sampled is not None:
                 self._add_key_color(sampled)
                 self._set_pick_mode(None)
                 self._refresh_action_states()
+=======
+        tool = self._active_paint_tool()
+        if tool in {"pencil", "eraser"} and self._painting_enabled():
+            if self.palette_add_pick_mode or self.transparency_pick_mode:
+                self._set_pick_mode(None)
+            label: int | None = None
+            if tool == "pencil":
+                label = self._selected_paint_label()
+                if label is None:
+                    self.process_status_var.set("Select exactly one palette swatch to paint with Pencil.")
+                    return
+            self._capture_palette_undo_state()
+            self._paint_stroke_active = True
+            self._paint_stroke_changed = 0
+            self._paint_last_point = None
+            self.canvas.configure(cursor="crosshair")
+            self._paint_stroke_changed += self._apply_paint_at_canvas_point(event.x, event.y, tool=tool, label=label)
+>>>>>>> theirs
             return
         if self.palette_add_pick_mode:
             sampled = self._sample_label_from_preview(event.x, event.y, view="original")
@@ -2048,6 +2440,11 @@ class PixelFixGui:
         self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
 
     def _on_canvas_drag(self, event: tk.Event) -> None:
+        if self._paint_stroke_active:
+            tool = self._active_paint_tool()
+            label = self._selected_paint_label() if tool == "pencil" else None
+            self._paint_stroke_changed += self._apply_paint_at_canvas_point(event.x, event.y, tool=tool, label=label)
+            return
         if not self.dragging or self._display_context is None:
             return
         canvas_width = max(1, self.canvas.winfo_width())
@@ -2059,11 +2456,22 @@ class PixelFixGui:
         self.redraw_canvas()
 
     def _on_canvas_release(self, _event: tk.Event) -> None:
+        if self._paint_stroke_active:
+            tool = self._active_paint_tool()
+            verb = "Pencil" if tool == "pencil" else "Eraser"
+            self.process_status_var.set(f"{verb}: changed {self._paint_stroke_changed} pixels")
+            self._paint_stroke_active = False
+            self._paint_stroke_changed = 0
+            self._paint_last_point = None
+            self._refresh_action_states()
         self.dragging = False
         self.canvas.configure(cursor=self._cursor_for_pointer())
 
     def _on_canvas_motion(self, event: tk.Event) -> None:
-        if self.dragging:
+        paint_stroke_active = bool(getattr(self, "_paint_stroke_active", False))
+        if paint_stroke_active or (self._active_paint_tool() in {"pencil", "eraser"} and self._painting_enabled()):
+            self.canvas.configure(cursor="crosshair")
+        elif self.dragging:
             self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
         elif self.key_color_pick_mode or self.palette_add_pick_mode or self.transparency_pick_mode:
             self.canvas.configure(cursor="crosshair")
@@ -2090,7 +2498,13 @@ class PixelFixGui:
         self.redraw_canvas()
 
     def _cursor_for_pointer(self) -> str:
+<<<<<<< ours
         if self.key_color_pick_mode or self.palette_add_pick_mode or self.transparency_pick_mode:
+=======
+        if self._active_paint_tool() in {"pencil", "eraser"} and self._painting_enabled():
+            return "crosshair"
+        if self.palette_add_pick_mode or self.transparency_pick_mode:
+>>>>>>> theirs
             return "crosshair"
         return OPEN_HAND_CURSOR if self._point_is_over_image() else ""
 
@@ -2362,6 +2776,9 @@ class PixelFixGui:
             output_mode=COLOR_MODE_DISPLAY_TO_VALUE.get(self.output_mode_var.get(), "rgba"),
             quantizer=QUANTIZER_DISPLAY_TO_VALUE.get(self.quantizer_var.get(), QUANTIZER_OPTIONS[0][1]),
             dither_mode=DITHER_DISPLAY_TO_VALUE.get(self.dither_var.get(), "none"),
+            paint_tool=str(self.paint_tool_var.get() or "pan").strip().lower(),
+            brush_width=max(1, min(64, int(self.brush_width_var.get() or 1))),
+            brush_shape=next((value for (label, value) in BRUSH_SHAPE_OPTIONS if label == self.brush_shape_var.get()), "square"),
         )
 
     def _sync_controls_from_settings(self, settings: PreviewSettings) -> None:
@@ -2382,6 +2799,9 @@ class PixelFixGui:
             self.output_mode_var.set(COLOR_MODE_VALUE_TO_DISPLAY.get(settings.output_mode, COLOR_MODE_OPTIONS[0][0]))
             self.quantizer_var.set(QUANTIZER_VALUE_TO_DISPLAY.get(settings.quantizer, QUANTIZER_OPTIONS[0][0]))
             self.dither_var.set(DITHER_VALUE_TO_DISPLAY.get(settings.dither_mode, DITHER_OPTIONS[0][0]))
+            self.paint_tool_var.set(settings.paint_tool)
+            self.brush_width_var.set(settings.brush_width)
+            self.brush_shape_var.set(next((label for (label, value) in BRUSH_SHAPE_OPTIONS if value == settings.brush_shape), BRUSH_SHAPE_OPTIONS[0][0]))
         finally:
             self._suspend_control_events = False
         self._update_palette_adjustment_labels()
@@ -2426,6 +2846,11 @@ class PixelFixGui:
             or previous.output_mode != updated.output_mode
             or previous.dither_mode != updated.dither_mode
         )
+        paint_controls_changed = (
+            previous.paint_tool != updated.paint_tool
+            or previous.brush_width != updated.brush_width
+            or previous.brush_shape != updated.brush_shape
+        )
         if downsample_changed:
             self._clear_palette_undo_state()
             self.prepared_input_cache = None
@@ -2463,6 +2888,11 @@ class PixelFixGui:
         elif palette_apply_changed:
             self._clear_palette_undo_state()
             message = message or "Palette settings changed. Click Apply Palette to update the preview."
+        elif paint_controls_changed:
+            self._schedule_state_persist()
+            self._refresh_action_states()
+            self.canvas.configure(cursor=self._cursor_for_pointer())
+            return
         self._mark_output_stale(message)
         self._update_key_color_list()
         self._update_palette_adjustment_labels()
@@ -2518,6 +2948,15 @@ class PixelFixGui:
             index for index in getattr(self, "_palette_selection_indices", set()) if 0 <= index < len(getattr(self, "_displayed_palette", []))
         ]
         has_single_palette_selection = len(valid_palette_selection) == 1
+<<<<<<< ours
+<<<<<<< ours
+=======
+=======
+>>>>>>> theirs
+        adaptive_outline = self._outline_adaptive_enabled()
+        can_merge_palette = has_palette_source and len(valid_palette_selection) >= 2 and not busy
+        can_ramp_palette = has_palette_source and len(valid_palette_selection) >= 1 and not busy
+>>>>>>> theirs
         can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
         advanced_editable = has_image and not busy and not self._palette_is_override_mode()
         for widget, enabled in (
@@ -2526,7 +2965,11 @@ class PixelFixGui:
             (self.generate_override_palette_button, has_downsample and not busy),
             (self.reduce_palette_button, has_downsample and not busy and has_palette_source),
             (self.transparency_button, has_output and not busy),
-            (self.add_outline_button, has_output and not busy and has_single_palette_selection),
+<<<<<<< ours
+            (self.add_outline_button, has_output and not busy and (adaptive_outline or has_single_palette_selection)),
+=======
+            (self.add_outline_button, has_output and not busy and (has_single_palette_selection or adaptive_outline)),
+>>>>>>> theirs
             (self.remove_outline_button, has_output and not busy),
             (self.zoom_in_button, has_image and not busy),
             (self.zoom_out_button, has_image and not busy),
@@ -2544,7 +2987,17 @@ class PixelFixGui:
         self.transparency_button.configure(text="Cancel Transparency" if self.transparency_pick_mode else "Make Transparent")
         self.pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
         self.palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+<<<<<<< ours
         self.key_color_listbox.configure(state=tk.NORMAL if advanced_editable else tk.DISABLED)
+=======
+        paint_controls_enabled = has_output and not busy
+        for button in getattr(self, "paint_tool_buttons", []):
+            button.configure(state=tk.NORMAL if paint_controls_enabled else tk.DISABLED)
+        if hasattr(self, "brush_width_spinbox"):
+            self.brush_width_spinbox.configure(state="normal" if paint_controls_enabled else "disabled")
+        if hasattr(self, "brush_shape_combo"):
+            self.brush_shape_combo.configure(state="readonly" if paint_controls_enabled else "disabled")
+>>>>>>> theirs
         adjustment_state = tk.NORMAL if has_palette_source and not busy else tk.DISABLED
         for control in getattr(self, "palette_adjustment_controls", []):
             control.configure(state=adjustment_state)
@@ -2590,6 +3043,29 @@ class PixelFixGui:
         self.redraw_canvas()
         self._schedule_state_persist()
 
+<<<<<<< ours
+=======
+    def _on_outline_pixel_perfect_changed(self) -> None:
+        self._schedule_state_persist()
+
+<<<<<<< ours
+    def _on_outline_adaptive_changed(self) -> None:
+        self._schedule_state_persist()
+
+>>>>>>> theirs
+=======
+    def _on_outline_brightness_threshold_changed(self, _event=None) -> None:
+        self._outline_brightness_threshold_value()
+        self._sync_outline_brightness_threshold_state()
+        self._schedule_state_persist()
+
+    def _sync_outline_brightness_threshold_state(self) -> None:
+        spinbox = getattr(self, "outline_brightness_threshold_spinbox", None)
+        if spinbox is None:
+            return
+        spinbox.configure(state=tk.NORMAL if self._outline_brightness_threshold_enabled() else tk.DISABLED)
+
+>>>>>>> theirs
     def _schedule_state_persist(self) -> None:
         if self._persist_after_id is not None:
             self.root.after_cancel(self._persist_after_id)
@@ -2608,6 +3084,19 @@ class PixelFixGui:
                 "zoom": self.zoom,
                 "selection_threshold": self._selection_threshold_percent(),
                 "checkerboard": self.checkerboard_var.get(),
+<<<<<<< ours
+=======
+                "outline_pixel_perfect": self._outline_pixel_perfect_enabled(),
+<<<<<<< ours
+                "outline_adaptive": self._outline_adaptive_enabled(),
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+                "outline_brightness_threshold_enabled": self._outline_brightness_threshold_enabled(),
+                "outline_brightness_threshold": self._outline_brightness_threshold_value(),
+>>>>>>> theirs
                 "view_mode": self.view_var.get(),
                 "recent_files": self.recent_files,
             }

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels, adjust_structured_palette
@@ -16,6 +17,7 @@ from pixel_fix.palette.sort import (
     PALETTE_SELECT_HUE_BLUE,
     PALETTE_SELECT_LIGHTNESS_DARK,
     PALETTE_SELECT_LIGHTNESS_LIGHT,
+    PALETTE_SELECT_MODES,
     PALETTE_SELECT_SATURATION_HIGH,
     PALETTE_SELECT_SATURATION_LOW,
     PALETTE_SELECT_TEMPERATURE_COOL,
@@ -29,6 +31,13 @@ from pixel_fix.palette.sort import (
     sort_palette_labels,
 )
 from pixel_fix.palette.workspace import ColorWorkspace, hyab_distance
+
+
+def _similarity_selection_mode() -> str:
+    for mode in PALETTE_SELECT_MODES:
+        if "similar" in mode or "duplicate" in mode:
+            return mode
+    pytest.skip("Similarity palette selection mode is not available in this build.")
 
 
 def test_color_mode_grayscale_conversion() -> None:
@@ -158,6 +167,47 @@ def test_select_palette_by_hue_bucket_excludes_neutrals_and_caps_at_eligible_cou
     blue_indices = select_palette_indices(labels, PALETTE_SELECT_HUE_BLUE, 100, workspace)
 
     assert blue_indices == [1, 2]
+
+
+def test_select_palette_by_similarity_targets_near_duplicates_in_original_order() -> None:
+    workspace = ColorWorkspace()
+    mode = _similarity_selection_mode()
+    labels = [0x101010, 0x111111, 0x80FF00, 0x80FE00, 0xB040A0, 0x00B0FF]
+
+    selected = select_palette_indices(labels, mode, 70, workspace)
+
+    assert selected == [0, 1, 2, 3]
+    assert selected == sorted(selected)
+
+
+def test_similarity_selection_edge_cases_cover_empty_single_and_threshold_extremes() -> None:
+    workspace = ColorWorkspace()
+    mode = _similarity_selection_mode()
+    labels = [0x202020, 0x212121, 0x303030, 0x31FF31, 0x32FE30, 0xF01010]
+
+    assert select_palette_indices([], mode, 50, workspace) == []
+    assert select_palette_indices([0x123456], mode, 50, workspace) == []
+
+    strict = select_palette_indices(labels, mode, 10, workspace)
+    loose = select_palette_indices(labels, mode, 100, workspace)
+
+    assert strict == sorted(strict)
+    assert loose == sorted(loose)
+    assert len(strict) < len(loose)
+    assert set(strict).issubset(set(loose))
+
+
+def test_similarity_selection_output_can_be_merged_with_merge_palette_labels() -> None:
+    workspace = ColorWorkspace()
+    mode = _similarity_selection_mode()
+    labels = [0x335577, 0x345678, 0xFFCC00, 0x10C0A0, 0x11BFA1]
+
+    selected = select_palette_indices(labels, mode, 60, workspace)
+    merged = merge_palette_labels([labels[index] for index in selected], workspace=workspace)
+
+    assert selected == [0, 1, 3, 4]
+    assert isinstance(merged, int)
+    assert 0 <= merged <= 0xFFFFFF
 
 
 def test_json_palette_load_remains_supported(tmp_path: Path) -> None:

@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from pixel_fix.io import copy_as_placeholder, validate_input_path, validate_output_path
+from PIL import Image
+
+from pixel_fix.io import validate_input_path, validate_output_path
 from pixel_fix.palette.advanced import (
     generate_structured_palette,
     map_palette_to_labels,
@@ -224,4 +226,72 @@ class PixelFixPipeline:
     def run_file(self, input_path: Path, output_path: Path) -> None:
         validate_input_path(input_path)
         validate_output_path(output_path, overwrite=self.config.overwrite)
-        copy_as_placeholder(input_path, output_path)
+
+        labels, alpha = self._load_labels_and_alpha(input_path)
+        prepared = self.prepare_labels(labels)
+        reduced_alpha = resize_labels(alpha, prepared.pixel_width, method=self.config.downsample_mode) if alpha is not None else None
+        result = self.run_prepared_labels(prepared)
+        self._write_labels_as_png(output_path, result.labels, alpha_labels=reduced_alpha)
+
+    def run_file_with_progress(
+        self,
+        input_path: Path,
+        output_path: Path,
+        progress_callback: PipelineProgressCallback | None = None,
+    ) -> None:
+        validate_input_path(input_path)
+        validate_output_path(output_path, overwrite=self.config.overwrite)
+
+        self._emit_progress(progress_callback, 5, "Loading input image...")
+        labels, alpha = self._load_labels_and_alpha(input_path)
+        prepared = self.prepare_labels(labels, progress_callback=progress_callback)
+        reduced_alpha = resize_labels(alpha, prepared.pixel_width, method=self.config.downsample_mode) if alpha is not None else None
+        result = self.run_prepared_labels(prepared, progress_callback=progress_callback)
+        self._emit_progress(progress_callback, 98, "Writing output PNG...")
+        self._write_labels_as_png(output_path, result.labels, alpha_labels=reduced_alpha)
+        self._emit_progress(progress_callback, 100, "Saved output PNG")
+
+    @staticmethod
+    def _load_labels_and_alpha(input_path: Path) -> tuple[list[list[int]], list[list[int]] | None]:
+        with Image.open(input_path) as image:
+            rgba = image.convert("RGBA")
+            width, height = rgba.size
+            raw = rgba.tobytes()
+
+        labels: list[list[int]] = []
+        alpha_rows: list[list[int]] = []
+        has_transparency = False
+        stride = width * 4
+        for row_offset in range(0, height * stride, stride):
+            label_row: list[int] = []
+            alpha_row: list[int] = []
+            row_bytes = raw[row_offset : row_offset + stride]
+            for pixel_offset in range(0, len(row_bytes), 4):
+                red = row_bytes[pixel_offset]
+                green = row_bytes[pixel_offset + 1]
+                blue = row_bytes[pixel_offset + 2]
+                alpha = row_bytes[pixel_offset + 3]
+                label_row.append((red << 16) | (green << 8) | blue)
+                alpha_row.append(alpha)
+                has_transparency = has_transparency or alpha < 255
+            labels.append(label_row)
+            alpha_rows.append(alpha_row)
+        return labels, alpha_rows if has_transparency else None
+
+    @staticmethod
+    def _write_labels_as_png(output_path: Path, labels: list[list[int]], alpha_labels: list[list[int]] | None = None) -> None:
+        rgb = convert_mode(labels, "rgba")
+        height = len(rgb)
+        width = len(rgb[0]) if height else 0
+        image = Image.new("RGBA", (width, height))
+        data: list[tuple[int, int, int, int]] = []
+        for y, row in enumerate(rgb):
+            for x, value in enumerate(row):
+                red = (value >> 16) & 0xFF
+                green = (value >> 8) & 0xFF
+                blue = value & 0xFF
+                alpha = 255 if alpha_labels is None else max(0, min(255, int(alpha_labels[y][x])))
+                data.append((red, green, blue, alpha))
+        if data:
+            image.putdata(data)
+        image.save(output_path, format="PNG")

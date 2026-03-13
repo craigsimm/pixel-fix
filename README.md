@@ -47,6 +47,31 @@ If the script entrypoints are installed and on `PATH`, this also works:
 pixel-fix-gui
 ```
 
+### CLI usage
+
+The CLI runs the same base pipeline and then applies optional deterministic post-processing helpers.
+
+```bash
+pixel-fix input.png output.png [options]
+```
+
+Post-processing order is always:
+
+1. base process
+2. transparency ops
+3. outline ops
+4. save
+
+Supported non-interactive helper flags:
+
+- `--transparent-color #RRGGBB` (repeatable)
+- `--add-outline-color #RRGGBB [--outline-pixel-perfect]`
+- `--remove-outline [--outline-pixel-perfect] [--outline-brightness-threshold 0-255]`
+
+Click-based connected-region transparency tools remain GUI-only.
+
+Use `--verbose` to print per-image helper stats (pixels changed per operation).
+
 ## What The App Does
 
 From one interface, you can:
@@ -80,7 +105,7 @@ From one interface, you can:
   - `Saturation`
 - Apply the current palette only when you click `Apply Palette`.
 - Remove connected regions to transparency with the processed-image transparency picker.
-- Add a 1-pixel exterior outline around the current processed silhouette using one selected palette colour.
+- Add a 1-pixel exterior outline around the current processed silhouette using either one selected palette colour (fixed mode) or adaptive per-pixel colours derived from neighbouring pixels.
 - Remove a 1-pixel exterior outline by eroding the outside edge to transparency.
 - Use dithering when applying palettes:
   - `None`
@@ -179,8 +204,19 @@ The `Select` menu lets you select colours in the current palette by:
 - low/high chroma
 - cool/warm temperature
 - hue buckets: red, yellow, green, cyan, blue, magenta
+- perceptual similarity to the current swatch selection
+
+Similarity selection helps prevent near-duplicate palette bloat by expanding your selection to swatches that are effectively the same colour family before you edit.
+
+For similarity cleanup, use this flow:
+
+1. Run the similarity select command from `Select`.
+2. Review the highlighted swatches in the `Current palette` strip.
+3. Click `Merge` to collapse the selected near-duplicates to one perceptual median colour.
+4. Click `Apply Palette` to update the processed image.
 
 The selection count is controlled by `Preferences > Selection Threshold`.
+For similarity selection, a lower `Selection Threshold` is stricter (only very close matches are selected), while a higher `Selection Threshold` is more permissive and includes less-similar swatches.
 
 #### Processed-image tools
 
@@ -189,10 +225,18 @@ After a processed image exists, you can:
 - `Make Transparent`
   - click the processed image to remove only the connected region under the cursor
 - `Add Outline`
-  - requires exactly one selected swatch in the current palette
+  - fixed-colour mode requires exactly one selected swatch in the current palette
+  - enable `Adaptive` to derive each outline pixel from neighbouring visible pixels instead of a selected swatch
+  - adaptive colour picks the dominant neighbouring colour around that outline pixel, then darkens it (20% by default)
+  - ties are resolved deterministically by choosing the lower RGB label value
   - adds a 1-pixel outline around the outside silhouette only
 - `Remove Outline`
   - removes the outer inside edge of the current silhouette by making it transparent
+<<<<<<< ours
+=======
+  - defaults to `Pixel Perfect`, which removes the cleaned edge mask instead of the full square ring
+  - optional `Brightness ≤` threshold only removes edge pixels at or below that brightness value (0-255)
+>>>>>>> theirs
 
 These tools work through the processed image's per-pixel alpha mask, so saved PNGs preserve the transparency.
 
@@ -268,12 +312,85 @@ dist/pixel-fix-gui.exe
 
 ## CLI Status
 
-The package still exposes:
+The project ships two entrypoints:
 
-- `pixel-fix`
-- `pixel-fix-gui`
+- `pixel-fix` for scripted/automation-friendly runs
+- `pixel-fix-gui` for interactive editing
 
-But the GUI is the most complete and current interface.
+### Feature scope
+
+The CLI is intended for repeatable, non-interactive image processing tasks:
+
+- single-image transforms with explicit flags
+- deterministic batch runs over folders/globs
+- settings-profile driven runs for CI/build pipelines
+- optional machine-readable reports for downstream tooling
+
+### Differences vs GUI interactive tools
+
+The GUI remains the best place to discover and tune results visually (palette editing, iterative preview, click-driven transparency and outline workflows). The CLI focuses on unattended execution, so:
+
+- no live preview loop or canvas-driven selection
+- no interactive palette strip edits during execution
+- no manual click-to-pick transparency regions
+- explicit conflict/error handling suitable for scripts
+
+### Command examples
+
+Single-file process with a palette:
+
+```bash
+pixel-fix in/source.png out/clean.png \
+  --palette palettes/gb-studio.gpl \
+  --pixel-size 2 \
+  --downsample-mode rotsprite
+```
+
+Thresholded remove-outline run:
+
+```bash
+pixel-fix in/outlined.png out/no-outline.png \
+  --remove-outline \
+  --remove-outline-threshold 0.22 \
+  --pixel-perfect
+```
+
+Batch processing with a settings profile:
+
+```bash
+pixel-fix batch assets/in assets/out \
+  --settings profiles/production.json \
+  --include "*.png"
+```
+
+Batch processing with JSON report output:
+
+```bash
+pixel-fix batch assets/in assets/out \
+  --settings profiles/production.json \
+  --report-json reports/pixel-fix-run.json
+```
+
+### Recommended workflow
+
+For production jobs: tune interactively in the GUI first, export the settings profile, then run the CLI in batch mode with that profile.
+
+### Exit codes and automation conflict/error policies
+
+Use these conventions when integrating with CI, build scripts, or asset pipelines:
+
+- `0`: success (all requested outputs written)
+- `2`: usage/config error (invalid flags, malformed profile, unsupported mode)
+- `3`: input validation error (missing input, unsupported format)
+- `4`: output conflict (target exists without overwrite/force policy)
+- `5`: processing/runtime error
+
+Conflict and error policy expectations:
+
+- existing outputs should fail fast by default
+- `--overwrite` (or equivalent) should be explicit in automation
+- batch mode should continue or stop according to an explicit policy flag (for example `--on-error continue|stop`)
+- JSON reports should include per-file status and error messages so failures can be triaged without log scraping
 
 ## Project Structure
 
