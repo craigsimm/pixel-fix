@@ -96,6 +96,7 @@ def add_exterior_outline(
     *,
     transparent_labels: set[int] | None = None,
     pixel_perfect: bool = True,
+    adaptive: bool = False,
 ) -> tuple[ProcessResult, int]:
     if result.width <= 0 or result.height <= 0:
         return result, 0
@@ -104,7 +105,6 @@ def add_exterior_outline(
     outline_mask = _raw_exterior_outline_mask(visible, exterior)
     if pixel_perfect:
         outline_mask = _pixel_perfect_mask(outline_mask)
-    outline_rgb = ((outline_label >> 16) & 0xFF, (outline_label >> 8) & 0xFF, outline_label & 0xFF)
     next_grid = [list(row) for row in result.grid]
     next_mask = [row[:] for row in visible]
     changed = 0
@@ -112,12 +112,30 @@ def add_exterior_outline(
         for x in range(result.width):
             if not outline_mask[y][x]:
                 continue
-            next_grid[y][x] = outline_rgb
+            if adaptive:
+                next_grid[y][x] = _adaptive_outline_rgb(result, visible, x, y)
+            else:
+                next_grid[y][x] = outline_rgb
             next_mask[y][x] = True
             changed += 1
     if changed == 0:
         return result, 0
     return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), changed
+
+
+def _adaptive_outline_rgb(result: ProcessResult, visible: list[list[bool]], x: int, y: int) -> RGBPixel:
+    counts: dict[RGBPixel, int] = {}
+    for ny in range(max(0, y - 1), min(result.height, y + 2)):
+        for nx in range(max(0, x - 1), min(result.width, x + 2)):
+            if nx == x and ny == y:
+                continue
+            if not visible[ny][nx]:
+                continue
+            rgb = result.grid[ny][nx]
+            counts[rgb] = counts.get(rgb, 0) + 1
+    if not counts:
+        return result.grid[y][x]
+    return max(counts.items(), key=lambda item: item[1])[0]
 
 
 def remove_exterior_outline(
@@ -158,6 +176,77 @@ def _effective_visible_mask(result: ProcessResult, transparent_labels: set[int] 
             visible_row.append(alpha_visible and label not in blocked)
         visible.append(visible_row)
     return visible
+
+
+def _sample_interior_neighbor_labels(result: ProcessResult, visible: list[list[bool]], x: int, y: int) -> list[int]:
+    neighbors_8 = _collect_neighbor_labels(result, visible, x, y, include_diagonals=True)
+    if neighbors_8:
+        return neighbors_8
+    neighbors_4 = _collect_neighbor_labels(result, visible, x, y, include_diagonals=False)
+    if neighbors_4:
+        return neighbors_4
+    return _collect_nearest_visible_labels(result, visible, x, y)
+
+
+def _collect_neighbor_labels(
+    result: ProcessResult,
+    visible: list[list[bool]],
+    x: int,
+    y: int,
+    *,
+    include_diagonals: bool,
+) -> list[int]:
+    labels: list[int] = []
+    for neighbor_y in range(max(0, y - 1), min(result.height, y + 2)):
+        for neighbor_x in range(max(0, x - 1), min(result.width, x + 2)):
+            if neighbor_x == x and neighbor_y == y:
+                continue
+            if not include_diagonals and neighbor_x != x and neighbor_y != y:
+                continue
+            if not visible[neighbor_y][neighbor_x]:
+                continue
+            red, green, blue = result.grid[neighbor_y][neighbor_x]
+            labels.append((red << 16) | (green << 8) | blue)
+    return labels
+
+
+def _collect_nearest_visible_labels(result: ProcessResult, visible: list[list[bool]], x: int, y: int) -> list[int]:
+    max_radius = max(result.width, result.height)
+    for radius in range(1, max_radius + 1):
+        labels: list[int] = []
+        min_x = max(0, x - radius)
+        max_x = min(result.width - 1, x + radius)
+        min_y = max(0, y - radius)
+        max_y = min(result.height - 1, y + radius)
+        for neighbor_y in range(min_y, max_y + 1):
+            for neighbor_x in range(min_x, max_x + 1):
+                if max(abs(neighbor_x - x), abs(neighbor_y - y)) != radius:
+                    continue
+                if not visible[neighbor_y][neighbor_x]:
+                    continue
+                red, green, blue = result.grid[neighbor_y][neighbor_x]
+                labels.append((red << 16) | (green << 8) | blue)
+        if labels:
+            return labels
+    return [0]
+
+
+def _select_dominant_color_label(labels: list[int]) -> int:
+    if not labels:
+        return 0
+    frequencies: dict[int, int] = {}
+    for label in labels:
+        frequencies[label] = frequencies.get(label, 0) + 1
+    max_count = max(frequencies.values())
+    candidates = [label for label, count in frequencies.items() if count == max_count]
+    return min(candidates)
+
+
+def _darken_label(label: int, factor: float = 0.7) -> int:
+    red = max(0, min(255, int(((label >> 16) & 0xFF) * factor)))
+    green = max(0, min(255, int(((label >> 8) & 0xFF) * factor)))
+    blue = max(0, min(255, int((label & 0xFF) * factor)))
+    return (red << 16) | (green << 8) | blue
 
 
 def _raw_exterior_outline_mask(visible: list[list[bool]], exterior: list[list[bool]]) -> list[list[bool]]:

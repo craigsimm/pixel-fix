@@ -18,10 +18,24 @@ from pixel_fix.gui.processing import (
 )
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.palette.advanced import generate_structured_palette
-from pixel_fix.palette.sort import PALETTE_SELECT_LIGHTNESS_DARK, PALETTE_SORT_HUE, PALETTE_SORT_LIGHTNESS
+from pixel_fix.palette.sort import (
+    PALETTE_SELECT_LABELS,
+    PALETTE_SELECT_LIGHTNESS_DARK,
+    PALETTE_SELECT_MODES,
+    PALETTE_SORT_HUE,
+    PALETTE_SORT_LIGHTNESS,
+)
 from pixel_fix.palette.workspace import ColorWorkspace
 from pixel_fix.pipeline import PipelineConfig, PipelinePreparedResult
 
+
+
+
+def _similarity_selection_mode() -> str:
+    for mode in PALETTE_SELECT_MODES:
+        if "similar" in mode or "duplicate" in mode:
+            return mode
+    pytest.skip("Similarity palette selection mode is not available in this build.")
 
 def _sample_grid():
     return [
@@ -340,6 +354,24 @@ def test_add_exterior_outline_pixel_perfect_stair_step_has_no_full_2x2_blocks() 
     ]
     _assert_no_full_2x2(added_mask)
 
+
+
+
+def test_add_exterior_outline_adaptive_uses_neighbouring_colours() -> None:
+    result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000, 0x000000],
+            [0x000000, 0x112233, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000, 0x000000],
+        ]
+    )
+
+    updated, changed = add_exterior_outline(result, 0xABCDEF, adaptive=True, pixel_perfect=False)
+
+    assert changed > 0
+    assert updated.grid[0][1] in {(0x11, 0x22, 0x33), (0x44, 0x55, 0x66)}
+    assert updated.grid[0][2] in {(0x11, 0x22, 0x33), (0x44, 0x55, 0x66)}
+    assert updated.grid[0][1] != (0xAB, 0xCD, 0xEF)
 
 def test_remove_exterior_outline_defaults_to_pixel_perfect_edge_removal() -> None:
     result = _result_from_labels(
@@ -1338,6 +1370,30 @@ def test_select_current_palette_replaces_selection_using_displayed_palette() -> 
     assert updates == ["reset", "palette", "refresh"]
 
 
+
+
+def test_select_current_palette_similarity_mode_updates_selection_and_status_text() -> None:
+    updates: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.workspace = ColorWorkspace()
+    gui.selection_threshold_var = SimpleNamespace(get=lambda: 50)
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._get_display_palette = lambda: ([0x101010, 0x111111, 0x80FF00, 0x80FE00, 0xB040A0], "Generated")
+    gui._palette_selection_indices = {4}
+    gui._palette_selection_anchor_index = 4
+    gui._reset_palette_ctrl_drag_state = lambda: updates.append("reset")
+    gui._update_palette_strip = lambda: updates.append("palette")
+    gui._refresh_action_states = lambda: updates.append("refresh")
+
+    mode = _similarity_selection_mode()
+
+    PixelFixGui.select_current_palette(gui, mode)
+
+    assert gui._palette_selection_indices == {0, 1, 2}
+    assert gui._palette_selection_anchor_index == 0
+    assert gui.process_status_var.value == f"Selected 3 palette colours by {PALETTE_SELECT_LABELS[mode]} at 50%."
+    assert updates == ["reset", "palette", "refresh"]
+
 def test_selection_threshold_change_persists_without_marking_output_stale() -> None:
     messages: list[str] = []
     gui = PixelFixGui.__new__(PixelFixGui)
@@ -1668,6 +1724,56 @@ def test_remove_outline_updates_output_and_undo_restores() -> None:
     assert PixelFixGui._undo_palette_application(gui) is True
     assert gui.palette_display_image.getpixel((1, 1))[3] == 255
 
+
+
+
+def test_add_outline_from_selection_allows_adaptive_without_palette_selection() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.downsample_result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000, 0x000000],
+            [0x000000, 0x112233, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000, 0x000000],
+        ],
+        stage="palette",
+    )
+    gui.palette_result = None
+    gui.transparent_colors = set()
+    gui.downsample_display_image = None
+    gui.palette_display_image = None
+    gui.image_state = "processed_current"
+    gui.last_successful_process_snapshot = {"stage": "downsample"}
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.session = SimpleNamespace(current=PreviewSettings())
+    gui.quick_compare_active = False
+    gui.view_var = SimpleNamespace(set=lambda _value: None)
+    gui.outline_pixel_perfect_var = SimpleNamespace(get=lambda: False)
+    gui.outline_adaptive_var = SimpleNamespace(get=lambda: True)
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._displayed_palette = [0x112233, 0x445566]
+    gui._palette_selection_indices = set()
+    gui._palette_selection_anchor_index = None
+    gui._update_palette_strip = lambda: None
+    gui._update_image_info = lambda: None
+    gui.redraw_canvas = lambda: None
+    gui._schedule_state_persist = lambda: None
+    gui._refresh_action_states = lambda: None
+    gui._sync_controls_from_settings = lambda _settings: None
+    gui._clear_palette_undo_state = lambda: setattr(gui, "_palette_undo_state", None)
+    PixelFixGui._refresh_output_display_images(gui)
+
+    PixelFixGui._add_outline_from_selection(gui)
+
+    assert gui.process_status_var.value == "Added adaptive outline to 10 pixels. Press Undo to restore it."
+
+
+def test_outline_adaptive_enabled_defaults_false_without_gui_state() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+
+    assert PixelFixGui._outline_adaptive_enabled(gui) is False
 
 def test_outline_pixel_perfect_enabled_defaults_true_without_gui_state() -> None:
     gui = PixelFixGui.__new__(PixelFixGui)
