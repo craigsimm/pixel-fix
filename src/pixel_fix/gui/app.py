@@ -239,6 +239,7 @@ class PixelFixGui:
         self.dither_var = tk.StringVar()
         self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
         self.outline_pixel_perfect_var = tk.BooleanVar(value=bool(persisted.get("outline_pixel_perfect", True)))
+        self.outline_adaptive_var = tk.BooleanVar(value=bool(persisted.get("outline_adaptive", False)))
         self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
         self.scale_info_var = tk.StringVar(value="Open an image to set the pixel size.")
         self.palette_info_var = tk.StringVar(value="Palette: none")
@@ -457,6 +458,13 @@ class PixelFixGui:
             command=self._on_outline_pixel_perfect_changed,
         )
         self.outline_pixel_perfect_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_adaptive_toggle = ttk.Checkbutton(
+            outline_row,
+            text="Adaptive Colour",
+            variable=self.outline_adaptive_var,
+            command=self._on_outline_adaptive_changed,
+        )
+        self.outline_adaptive_toggle.pack(side=tk.LEFT, padx=(10, 0))
 
         adjust_section = self._create_section(sidebar, "4. Adjust palette")
         self.palette_adjustment_controls: list[tk.Scale] = []
@@ -1339,6 +1347,15 @@ class PixelFixGui:
             return bool(getter())
         return bool(variable)
 
+    def _outline_adaptive_enabled(self) -> bool:
+        variable = getattr(self, "outline_adaptive_var", None)
+        if variable is None:
+            return False
+        getter = getattr(variable, "get", None)
+        if callable(getter):
+            return bool(getter())
+        return bool(variable)
+
     def _set_current_output_result(self, result: ProcessResult) -> None:
         if getattr(self, "palette_result", None) is not None:
             self.palette_result = result
@@ -1349,19 +1366,28 @@ class PixelFixGui:
         current = self._current_output_result()
         if current is None or self.image_state == "processing":
             return
-        outline_label = self._selected_palette_outline_label()
-        if outline_label is None:
-            self.process_status_var.set("Select exactly one palette colour to add an outline.")
-            return
+        adaptive = self._outline_adaptive_enabled()
+        outline_label: int | None = 0
+        if not adaptive:
+            outline_label = self._selected_palette_outline_label()
+            if outline_label is None:
+                self.process_status_var.set("Select exactly one palette colour to add an outline.")
+                return
         pixel_perfect = self._outline_pixel_perfect_enabled()
         updated, changed = add_exterior_outline(
             current,
-            outline_label,
+            outline_label if outline_label is not None else 0,
             transparent_labels=getattr(self, "transparent_colors", set()),
             pixel_perfect=pixel_perfect,
+            adaptive=adaptive,
         )
         if changed <= 0:
-            if pixel_perfect:
+            if adaptive:
+                if pixel_perfect:
+                    self.process_status_var.set("No adaptive pixel-perfect exterior outline pixels were available to add.")
+                else:
+                    self.process_status_var.set("No adaptive exterior outline pixels were available to add.")
+            elif pixel_perfect:
                 self.process_status_var.set("No pixel-perfect exterior outline pixels were available to add.")
             else:
                 self.process_status_var.set("No exterior outline pixels were available to add.")
@@ -1371,7 +1397,16 @@ class PixelFixGui:
         self._set_current_output_result(updated)
         self._refresh_output_display_images()
         self._set_view("processed")
-        if pixel_perfect:
+        if adaptive:
+            if pixel_perfect:
+                self.process_status_var.set(
+                    f"Added adaptive pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                )
+            else:
+                self.process_status_var.set(
+                    f"Added adaptive outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                )
+        elif pixel_perfect:
             self.process_status_var.set(
                 f"Added pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''} with #{outline_label:06X}. Press Undo to restore it."
             )
@@ -2417,6 +2452,7 @@ class PixelFixGui:
             index for index in getattr(self, "_palette_selection_indices", set()) if 0 <= index < len(getattr(self, "_displayed_palette", []))
         ]
         has_single_palette_selection = len(valid_palette_selection) == 1
+        adaptive_outline = self._outline_adaptive_enabled()
         can_merge_palette = has_palette_source and len(valid_palette_selection) >= 2 and not busy
         can_ramp_palette = has_palette_source and len(valid_palette_selection) >= 1 and not busy
         can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
@@ -2425,7 +2461,7 @@ class PixelFixGui:
             (self.generate_override_palette_button, has_downsample and not busy),
             (self.reduce_palette_button, has_downsample and not busy and has_palette_source),
             (self.transparency_button, has_output and not busy),
-            (self.add_outline_button, has_output and not busy and has_single_palette_selection),
+            (self.add_outline_button, has_output and not busy and (adaptive_outline or has_single_palette_selection)),
             (self.remove_outline_button, has_output and not busy),
             (self.zoom_in_button, has_image and not busy),
             (self.zoom_out_button, has_image and not busy),
@@ -2488,6 +2524,9 @@ class PixelFixGui:
     def _on_outline_pixel_perfect_changed(self) -> None:
         self._schedule_state_persist()
 
+    def _on_outline_adaptive_changed(self) -> None:
+        self._schedule_state_persist()
+
     def _schedule_state_persist(self) -> None:
         if self._persist_after_id is not None:
             self.root.after_cancel(self._persist_after_id)
@@ -2507,6 +2546,7 @@ class PixelFixGui:
                 "selection_threshold": self._selection_threshold_percent(),
                 "checkerboard": self.checkerboard_var.get(),
                 "outline_pixel_perfect": self._outline_pixel_perfect_enabled(),
+                "outline_adaptive": self._outline_adaptive_enabled(),
                 "view_mode": self.view_var.get(),
                 "recent_files": self.recent_files,
             }

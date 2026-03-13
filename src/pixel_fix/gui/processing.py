@@ -113,17 +113,29 @@ def add_exterior_outline(
             if not outline_mask[y][x]:
                 continue
             if adaptive:
-                interior_labels = _sample_interior_neighbor_labels(result, visible, x, y)
-                dominant = _select_dominant_color_label(interior_labels)
-                label = _darken_label(dominant)
-                next_grid[y][x] = ((label >> 16) & 0xFF, (label >> 8) & 0xFF, label & 0xFF)
+                next_grid[y][x] = _adaptive_outline_rgb(result, visible, x, y)
             else:
-                next_grid[y][x] = ((outline_label >> 16) & 0xFF, (outline_label >> 8) & 0xFF, outline_label & 0xFF)
+                next_grid[y][x] = outline_rgb
             next_mask[y][x] = True
             changed += 1
     if changed == 0:
         return result, 0
     return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), changed
+
+
+def _adaptive_outline_rgb(result: ProcessResult, visible: list[list[bool]], x: int, y: int) -> RGBPixel:
+    counts: dict[RGBPixel, int] = {}
+    for ny in range(max(0, y - 1), min(result.height, y + 2)):
+        for nx in range(max(0, x - 1), min(result.width, x + 2)):
+            if nx == x and ny == y:
+                continue
+            if not visible[ny][nx]:
+                continue
+            rgb = result.grid[ny][nx]
+            counts[rgb] = counts.get(rgb, 0) + 1
+    if not counts:
+        return result.grid[y][x]
+    return max(counts.items(), key=lambda item: item[1])[0]
 
 
 def remove_exterior_outline(
