@@ -355,6 +355,42 @@ def test_add_exterior_outline_pixel_perfect_stair_step_has_no_full_2x2_blocks() 
     _assert_no_full_2x2(added_mask)
 
 
+
+
+def test_add_exterior_outline_adaptive_uses_dominant_neighbor_color() -> None:
+    result = _result_from_labels(
+        [
+            [0x000000, 0x000000, 0x000000],
+            [0x000000, 0x445566, 0x000000],
+            [0x000000, 0x000000, 0x000000],
+        ]
+    )
+
+    updated, changed = add_exterior_outline(result, 0x112233, adaptive=True)
+
+    assert changed == 4
+    assert updated.alpha_mask is not None
+    assert updated.grid[0][1] == (0x2F, 0x3B, 0x47)
+    assert updated.grid[1][0] == (0x2F, 0x3B, 0x47)
+    assert updated.grid[1][2] == (0x2F, 0x3B, 0x47)
+    assert updated.grid[2][1] == (0x2F, 0x3B, 0x47)
+
+
+def test_add_exterior_outline_adaptive_tie_breaks_to_smallest_label() -> None:
+    result = _result_from_labels(
+        [
+            [0x000000, 0xFF0000],
+            [0x0000FF, 0x000000],
+        ]
+    )
+
+    updated, changed = add_exterior_outline(result, 0xABCDEF, adaptive=True, pixel_perfect=False)
+
+    assert changed == 2
+    assert updated.grid[0][0] == (0x00, 0x00, 0xB2)
+    assert updated.grid[1][1] == (0x00, 0x00, 0xB2)
+
+
 def test_remove_exterior_outline_defaults_to_pixel_perfect_edge_removal() -> None:
     result = _result_from_labels(
         [
