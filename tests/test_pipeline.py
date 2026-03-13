@@ -1,3 +1,7 @@
+from pathlib import Path
+
+from PIL import Image
+
 from pixel_fix.pipeline import PipelineConfig, PixelFixPipeline
 
 
@@ -55,3 +59,17 @@ def test_run_on_labels_returns_structured_palette_metadata():
     assert result.seed_count == len(result.structured_palette.key_colors)
     assert result.ramp_count == len(result.structured_palette.ramps)
     assert result.effective_palette_size == result.structured_palette.palette_size()
+
+
+def test_run_file_writes_real_png_output(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.jpg"
+    output_path = tmp_path / "output.png"
+    image = Image.new("RGB", (2, 2))
+    image.putdata([(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)])
+    image.save(input_path, format="JPEG")
+
+    PixelFixPipeline(PipelineConfig(pixel_width=1, overwrite=True)).run_file(input_path, output_path)
+
+    with Image.open(output_path) as output_image:
+        assert output_image.format == "PNG"
+        assert output_image.size == (2, 2)

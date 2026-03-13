@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 from dataclasses import dataclass
+from functools import lru_cache
 from time import perf_counter
 
+import numpy as np
 from PIL import Image
 
 from pixel_fix.palette.model import StructuredPalette
 from pixel_fix.palette.color_modes import extract_unique_colors
+from pixel_fix.palette.workspace import ColorWorkspace, oklab_to_oklch, oklch_to_oklab
 from pixel_fix.pipeline import (
     PipelineConfig,
     PipelinePreparedResult,
@@ -18,6 +21,14 @@ from pixel_fix.types import LabelGrid
 
 RGB = tuple[int, int, int]
 RGBGrid = list[list[RGB]]
+BRUSH_SHAPE_SQUARE = "square"
+BRUSH_SHAPE_ROUND = "round"
+BRUSH_WIDTH_DEFAULT = 1
+BRUSH_WIDTH_MIN = 1
+BRUSH_WIDTH_MAX = 64
+OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK = "dark"
+OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT = "bright"
+OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT = 40
 
 
 def rgb_to_labels(grid: RGBGrid) -> LabelGrid:
@@ -90,6 +101,74 @@ def apply_transparency_fill(result: ProcessResult, x: int, y: int) -> tuple[Proc
     return replace(result, alpha_mask=tuple(tuple(row) for row in next_mask)), changed
 
 
+def brush_footprint(width: int = BRUSH_WIDTH_DEFAULT, shape: str = BRUSH_SHAPE_SQUARE) -> set[tuple[int, int]]:
+    return set(_brush_footprint_offsets(width, shape))
+
+
+@lru_cache(maxsize=None)
+def _brush_footprint_offsets(width: int, shape: str) -> tuple[tuple[int, int], ...]:
+    normalized_width = _coerce_brush_width(width)
+    normalized_shape = _coerce_brush_shape(shape)
+    if normalized_width == 1:
+        return ((0, 0),)
+    start = -(normalized_width // 2)
+    offsets = range(start, start + normalized_width)
+    if normalized_shape == BRUSH_SHAPE_SQUARE:
+        return tuple((offset_x, offset_y) for offset_y in offsets for offset_x in offsets)
+    radius = max(1.0, (normalized_width - 1) / 2.0)
+    radius_squared = (radius * radius) + 0.25
+    return tuple(
+        (offset_x, offset_y)
+        for offset_y in offsets
+        for offset_x in offsets
+        if (offset_x * offset_x) + (offset_y * offset_y) <= radius_squared
+    )
+
+
+def apply_pencil_operation(
+    result: ProcessResult,
+    x: int,
+    y: int,
+    label: int,
+    *,
+    width: int = BRUSH_WIDTH_DEFAULT,
+    shape: str = BRUSH_SHAPE_SQUARE,
+) -> tuple[ProcessResult, int]:
+    return apply_pencil_operations(result, ((x, y),), label=label, width=width, shape=shape)
+
+
+def apply_pencil_operations(
+    result: ProcessResult,
+    points: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+    *,
+    label: int,
+    width: int = BRUSH_WIDTH_DEFAULT,
+    shape: str = BRUSH_SHAPE_SQUARE,
+) -> tuple[ProcessResult, int]:
+    return _apply_brush_operations(result, points, label=label, erase=False, width=width, shape=shape)
+
+
+def apply_eraser_operation(
+    result: ProcessResult,
+    x: int,
+    y: int,
+    *,
+    width: int = BRUSH_WIDTH_DEFAULT,
+    shape: str = BRUSH_SHAPE_SQUARE,
+) -> tuple[ProcessResult, int]:
+    return apply_eraser_operations(result, ((x, y),), width=width, shape=shape)
+
+
+def apply_eraser_operations(
+    result: ProcessResult,
+    points: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+    *,
+    width: int = BRUSH_WIDTH_DEFAULT,
+    shape: str = BRUSH_SHAPE_SQUARE,
+) -> tuple[ProcessResult, int]:
+    return _apply_brush_operations(result, points, label=None, erase=True, width=width, shape=shape)
+
+
 def add_exterior_outline(
     result: ProcessResult,
     outline_label: int,
@@ -97,9 +176,11 @@ def add_exterior_outline(
     transparent_labels: set[int] | None = None,
     pixel_perfect: bool = True,
     adaptive: bool = False,
-) -> tuple[ProcessResult, int]:
+    adaptive_darken_percent: int = 60,
+    workspace: ColorWorkspace | None = None,
+) -> tuple[ProcessResult, int, tuple[int, ...]]:
     if result.width <= 0 or result.height <= 0:
-        return result, 0
+        return result, 0, ()
     visible = _effective_visible_mask(result, transparent_labels)
     exterior = _exterior_transparent_mask(visible)
     outline_mask = _raw_exterior_outline_mask(visible, exterior)
@@ -108,34 +189,40 @@ def add_exterior_outline(
     next_grid = [list(row) for row in result.grid]
     next_mask = [row[:] for row in visible]
     changed = 0
+    generated_labels: set[int] = set()
+    outline_rgb = _label_to_rgb(outline_label)
+    darken_percent = _coerce_outline_darken_percent(adaptive_darken_percent)
+    color_workspace = workspace or ColorWorkspace()
     for y in range(result.height):
         for x in range(result.width):
             if not outline_mask[y][x]:
                 continue
             if adaptive:
-                next_grid[y][x] = _adaptive_outline_rgb(result, visible, x, y)
+                label = _adaptive_outline_label(result, visible, x, y, darken_percent=darken_percent, workspace=color_workspace)
+                next_grid[y][x] = _label_to_rgb(label)
+                generated_labels.add(label)
             else:
                 next_grid[y][x] = outline_rgb
+                generated_labels.add(outline_label)
             next_mask[y][x] = True
             changed += 1
     if changed == 0:
-        return result, 0
-    return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), changed
+        return result, 0, ()
+    return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), changed, tuple(sorted(generated_labels))
 
 
-def _adaptive_outline_rgb(result: ProcessResult, visible: list[list[bool]], x: int, y: int) -> RGBPixel:
-    counts: dict[RGBPixel, int] = {}
-    for ny in range(max(0, y - 1), min(result.height, y + 2)):
-        for nx in range(max(0, x - 1), min(result.width, x + 2)):
-            if nx == x and ny == y:
-                continue
-            if not visible[ny][nx]:
-                continue
-            rgb = result.grid[ny][nx]
-            counts[rgb] = counts.get(rgb, 0) + 1
-    if not counts:
-        return result.grid[y][x]
-    return max(counts.items(), key=lambda item: item[1])[0]
+def _adaptive_outline_label(
+    result: ProcessResult,
+    visible: list[list[bool]],
+    x: int,
+    y: int,
+    *,
+    darken_percent: int,
+    workspace: ColorWorkspace,
+) -> int:
+    labels = _sample_interior_neighbor_labels(result, visible, x, y)
+    dominant = _select_dominant_color_label(labels)
+    return _darken_label(dominant, darken_percent=darken_percent, workspace=workspace)
 
 
 def remove_exterior_outline(
@@ -143,12 +230,24 @@ def remove_exterior_outline(
     *,
     transparent_labels: set[int] | None = None,
     pixel_perfect: bool = True,
+    brightness_threshold_enabled: bool = False,
+    brightness_threshold_percent: int = OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT,
+    brightness_threshold_direction: str = OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK,
+    workspace: ColorWorkspace | None = None,
 ) -> tuple[ProcessResult, int]:
     if result.width <= 0 or result.height <= 0:
         return result, 0
     visible = _effective_visible_mask(result, transparent_labels)
     exterior = _exterior_transparent_mask(visible)
     remove_mask = _raw_exterior_edge_mask(visible, exterior)
+    if brightness_threshold_enabled:
+        remove_mask = _filter_remove_mask_by_brightness(
+            result,
+            remove_mask,
+            threshold_percent=brightness_threshold_percent,
+            direction=brightness_threshold_direction,
+            workspace=workspace or ColorWorkspace(),
+        )
     if pixel_perfect:
         remove_mask = _pixel_perfect_mask(remove_mask)
     next_mask = [row[:] for row in visible]
@@ -242,11 +341,168 @@ def _select_dominant_color_label(labels: list[int]) -> int:
     return min(candidates)
 
 
-def _darken_label(label: int, factor: float = 0.7) -> int:
-    red = max(0, min(255, int(((label >> 16) & 0xFF) * factor)))
-    green = max(0, min(255, int(((label >> 8) & 0xFF) * factor)))
-    blue = max(0, min(255, int((label & 0xFF) * factor)))
-    return (red << 16) | (green << 8) | blue
+def _darken_label(label: int, *, darken_percent: int, workspace: ColorWorkspace) -> int:
+    percent = _coerce_outline_darken_percent(darken_percent)
+    if percent <= 0:
+        return int(label)
+    if percent >= 100:
+        return 0
+    oklab = workspace.label_to_oklab(int(label))
+    oklch = oklab_to_oklch(np.asarray([oklab], dtype=np.float64))
+    oklch[0, 0] = np.clip(oklch[0, 0] * (1.0 - (percent / 100.0)), 0.0, 1.0)
+    darkened = oklch_to_oklab(oklch)[0]
+    return workspace.oklab_to_label(darkened)
+
+
+def _coerce_outline_darken_percent(value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 60
+    return max(0, min(100, parsed))
+
+
+def _coerce_brush_width(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = BRUSH_WIDTH_DEFAULT
+    return max(BRUSH_WIDTH_MIN, min(BRUSH_WIDTH_MAX, parsed))
+
+
+def _coerce_brush_shape(value: object) -> str:
+    normalized = str(value or BRUSH_SHAPE_SQUARE).strip().lower()
+    if normalized == BRUSH_SHAPE_ROUND:
+        return BRUSH_SHAPE_ROUND
+    return BRUSH_SHAPE_SQUARE
+
+
+def _coerce_outline_remove_brightness_threshold_percent(value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT
+    return max(0, min(100, parsed))
+
+
+def _coerce_outline_remove_brightness_direction(value: object) -> str:
+    normalized = str(value or OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK).strip().lower()
+    if normalized == OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT:
+        return OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT
+    return OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK
+
+
+def _filter_remove_mask_by_brightness(
+    result: ProcessResult,
+    remove_mask: list[list[bool]],
+    *,
+    threshold_percent: int,
+    direction: str,
+    workspace: ColorWorkspace,
+) -> list[list[bool]]:
+    filtered = [row[:] for row in remove_mask]
+    threshold_lightness = _coerce_outline_remove_brightness_threshold_percent(threshold_percent) / 100.0
+    normalized_direction = _coerce_outline_remove_brightness_direction(direction)
+    for y in range(result.height):
+        for x in range(result.width):
+            if not remove_mask[y][x]:
+                continue
+            red, green, blue = result.grid[y][x]
+            label = (red << 16) | (green << 8) | blue
+            filtered[y][x] = _matches_outline_remove_brightness_threshold(
+                label,
+                threshold_lightness=threshold_lightness,
+                direction=normalized_direction,
+                workspace=workspace,
+            )
+    return filtered
+
+
+def _matches_outline_remove_brightness_threshold(
+    label: int,
+    *,
+    threshold_lightness: float,
+    direction: str,
+    workspace: ColorWorkspace,
+) -> bool:
+    lightness = float(workspace.label_to_oklab(int(label))[0])
+    if direction == OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT:
+        return lightness >= threshold_lightness
+    return lightness <= threshold_lightness
+
+
+def _label_to_rgb(label: int) -> RGB:
+    return ((label >> 16) & 0xFF, (label >> 8) & 0xFF, label & 0xFF)
+
+
+def _brush_points_in_bounds(
+    result: ProcessResult,
+    x: int,
+    y: int,
+    *,
+    width: int,
+    shape: str,
+) -> list[tuple[int, int]]:
+    points: list[tuple[int, int]] = []
+    for offset_x, offset_y in _brush_footprint_offsets(_coerce_brush_width(width), _coerce_brush_shape(shape)):
+        point_x = x + offset_x
+        point_y = y + offset_y
+        if point_x < 0 or point_y < 0 or point_x >= result.width or point_y >= result.height:
+            continue
+        points.append((point_x, point_y))
+    return points
+
+
+def _apply_brush_operations(
+    result: ProcessResult,
+    points: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+    *,
+    label: int | None,
+    erase: bool,
+    width: int,
+    shape: str,
+) -> tuple[ProcessResult, int]:
+    if result.width <= 0 or result.height <= 0:
+        return result, 0
+    if not points:
+        return result, 0
+    current_mask = result.alpha_mask
+    target_rgb = _label_to_rgb(label) if label is not None else None
+    changed_points: set[tuple[int, int]] = set()
+    needs_mask_copy = erase or current_mask is not None
+    for center_x, center_y in points:
+        if center_x < 0 or center_y < 0 or center_x >= result.width or center_y >= result.height:
+            continue
+        for point_x, point_y in _brush_points_in_bounds(result, center_x, center_y, width=width, shape=shape):
+            if (point_x, point_y) in changed_points:
+                continue
+            if erase:
+                if current_mask is not None and not current_mask[point_y][point_x]:
+                    continue
+            else:
+                assert target_rgb is not None
+                is_visible = True if current_mask is None else bool(current_mask[point_y][point_x])
+                if result.grid[point_y][point_x] == target_rgb and is_visible:
+                    continue
+            changed_points.add((point_x, point_y))
+    if not changed_points:
+        return result, 0
+    next_grid = [list(row) for row in result.grid] if not erase else None
+    next_mask = [list(row) for row in current_mask] if current_mask is not None else ([[True] * result.width for _ in range(result.height)] if needs_mask_copy else None)
+    if erase:
+        assert next_mask is not None
+        for point_x, point_y in changed_points:
+            next_mask[point_y][point_x] = False
+        return replace(result, alpha_mask=_normalize_alpha_mask(next_mask)), len(changed_points)
+    assert next_grid is not None and target_rgb is not None
+    if next_mask is not None:
+        for point_x, point_y in changed_points:
+            next_grid[point_y][point_x] = target_rgb
+            next_mask[point_y][point_x] = True
+        return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), len(changed_points)
+    for point_x, point_y in changed_points:
+        next_grid[point_y][point_x] = target_rgb
+    return replace(result, grid=next_grid), len(changed_points)
 
 
 def _raw_exterior_outline_mask(visible: list[list[bool]], exterior: list[list[bool]]) -> list[list[bool]]:

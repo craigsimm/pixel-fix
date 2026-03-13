@@ -22,6 +22,8 @@ from pixel_fix.palette.sort import (
     PALETTE_SELECT_HUE_MODES,
     PALETTE_SELECT_LABELS,
     PALETTE_SELECT_MODES,
+    PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES,
+    PALETTE_SELECT_SPECIAL_MODES,
     PALETTE_SORT_CHROMA,
     PALETTE_SORT_HUE,
     PALETTE_SORT_LABELS,
@@ -47,10 +49,22 @@ from .persist import (
     serialize_settings,
 )
 from .processing import (
+    BRUSH_SHAPE_ROUND,
+    BRUSH_SHAPE_SQUARE,
+    BRUSH_WIDTH_DEFAULT,
+    BRUSH_WIDTH_MAX,
+    OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT,
+    OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK,
+    OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT,
     ProcessResult,
     RGBGrid,
     add_exterior_outline,
+    apply_eraser_operation,
+    apply_eraser_operations,
+    apply_pencil_operation,
+    apply_pencil_operations,
     apply_transparency_fill,
+    brush_footprint,
     display_resize_method,
     downsample_image,
     grid_to_pil_image,
@@ -87,6 +101,7 @@ PALETTE_SORT_OPTIONS = (
 )
 PALETTE_SELECT_OPTIONS = tuple((PALETTE_SELECT_LABELS[mode], mode) for mode in PALETTE_SELECT_DIRECT_MODES)
 PALETTE_SELECT_HUE_OPTIONS = tuple((PALETTE_SELECT_LABELS[mode].removeprefix("Hue (").removesuffix(")"), mode) for mode in PALETTE_SELECT_HUE_MODES)
+PALETTE_SELECT_SPECIAL_OPTIONS = tuple((PALETTE_SELECT_LABELS[mode], mode) for mode in PALETTE_SELECT_SPECIAL_MODES)
 
 RESIZE_OPTIONS = (
     ("Nearest Neighbor", "nearest"),
@@ -118,6 +133,13 @@ DITHER_DISPLAY_TO_VALUE = {label: value for (label, value) in DITHER_OPTIONS}
 DITHER_VALUE_TO_DISPLAY = {value: label for (label, value) in DITHER_OPTIONS}
 COLOR_MODE_DISPLAY_TO_VALUE = {label: value for (label, value) in COLOR_MODE_OPTIONS}
 COLOR_MODE_VALUE_TO_DISPLAY = {value: label for (label, value) in COLOR_MODE_OPTIONS}
+OUTLINE_COLOUR_MODE_PALETTE = "palette"
+OUTLINE_COLOUR_MODE_ADAPTIVE = "adaptive"
+OUTLINE_ADAPTIVE_DARKEN_DEFAULT = 60
+CANVAS_TOOL_MODE_PALETTE_PICK = "palette-pick"
+CANVAS_TOOL_MODE_TRANSPARENCY_PICK = "transparency-pick"
+CANVAS_TOOL_MODE_PENCIL = "pencil"
+CANVAS_TOOL_MODE_ERASER = "eraser"
 
 
 @dataclass
@@ -183,8 +205,13 @@ class PixelFixGui:
         self.active_palette_path: str | None = None
         self.transparent_colors: set[int] = set()
         self.advanced_palette_preview: StructuredPalette | None = None
+        self.canvas_tool_mode: str | None = None
         self.palette_add_pick_mode = False
         self.transparency_pick_mode = False
+        self._brush_stroke_active = False
+        self._brush_stroke_last_point: tuple[int, int] | None = None
+        self._brush_stroke_changed_pixels = 0
+        self._brush_stroke_tool_mode: str | None = None
         self._palette_selection_indices: set[int] = set()
         self._palette_selection_anchor_index: int | None = None
         self._palette_ctrl_drag_active = False
@@ -239,7 +266,26 @@ class PixelFixGui:
         self.dither_var = tk.StringVar()
         self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
         self.outline_pixel_perfect_var = tk.BooleanVar(value=bool(persisted.get("outline_pixel_perfect", True)))
-        self.outline_adaptive_var = tk.BooleanVar(value=bool(persisted.get("outline_adaptive", False)))
+        self.outline_colour_mode_var = tk.StringVar(value=self._initial_outline_colour_mode(persisted))
+        self.outline_adaptive_darken_percent_var = tk.IntVar(
+            value=self._coerce_outline_adaptive_darken_percent(persisted.get("outline_adaptive_darken_percent", OUTLINE_ADAPTIVE_DARKEN_DEFAULT))
+        )
+        self.outline_add_generated_colours_var = tk.BooleanVar(value=bool(persisted.get("outline_add_generated_colours", False)))
+        self.outline_remove_brightness_threshold_enabled_var = tk.BooleanVar(
+            value=bool(persisted.get("outline_remove_brightness_threshold_enabled", False))
+        )
+        self.outline_remove_brightness_threshold_percent_var = tk.IntVar(
+            value=self._coerce_outline_remove_brightness_threshold_percent(
+                persisted.get("outline_remove_brightness_threshold_percent", OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT)
+            )
+        )
+        self.outline_remove_brightness_threshold_direction_var = tk.StringVar(
+            value=self._coerce_outline_remove_brightness_direction(
+                persisted.get("outline_remove_brightness_threshold_direction", OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK)
+            )
+        )
+        self.brush_width_var = tk.IntVar(value=self._coerce_brush_width(persisted.get("brush_width", BRUSH_WIDTH_DEFAULT)))
+        self.brush_shape_var = tk.StringVar(value=self._coerce_brush_shape(persisted.get("brush_shape", BRUSH_SHAPE_SQUARE)))
         self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
         self.scale_info_var = tk.StringVar(value="Open an image to set the pixel size.")
         self.palette_info_var = tk.StringVar(value="Palette: none")
@@ -279,6 +325,57 @@ class PixelFixGui:
         if hasattr(sys, "_MEIPASS"):
             return Path(getattr(sys, "_MEIPASS")) / name
         return Path(__file__).resolve().parents[3] / name
+
+    @staticmethod
+    def _coerce_outline_colour_mode(value: object) -> str:
+        normalized = str(value or OUTLINE_COLOUR_MODE_PALETTE).strip().lower()
+        if normalized == OUTLINE_COLOUR_MODE_ADAPTIVE:
+            return OUTLINE_COLOUR_MODE_ADAPTIVE
+        return OUTLINE_COLOUR_MODE_PALETTE
+
+    @staticmethod
+    def _coerce_outline_adaptive_darken_percent(value: object) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = OUTLINE_ADAPTIVE_DARKEN_DEFAULT
+        return max(0, min(100, parsed))
+
+    @staticmethod
+    def _coerce_outline_remove_brightness_threshold_percent(value: object) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT
+        return max(0, min(100, parsed))
+
+    @staticmethod
+    def _coerce_outline_remove_brightness_direction(value: object) -> str:
+        normalized = str(value or OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK).strip().lower()
+        if normalized == OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT:
+            return OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT
+        return OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK
+
+    @staticmethod
+    def _coerce_brush_width(value: object) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = BRUSH_WIDTH_DEFAULT
+        return max(1, min(BRUSH_WIDTH_MAX, parsed))
+
+    @staticmethod
+    def _coerce_brush_shape(value: object) -> str:
+        normalized = str(value or BRUSH_SHAPE_SQUARE).strip().lower()
+        if normalized == BRUSH_SHAPE_ROUND:
+            return BRUSH_SHAPE_ROUND
+        return BRUSH_SHAPE_SQUARE
+
+    @classmethod
+    def _initial_outline_colour_mode(cls, persisted: dict[str, object]) -> str:
+        if "outline_colour_mode" in persisted:
+            return cls._coerce_outline_colour_mode(persisted.get("outline_colour_mode"))
+        return OUTLINE_COLOUR_MODE_ADAPTIVE if bool(persisted.get("outline_adaptive", False)) else OUTLINE_COLOUR_MODE_PALETTE
 
     def _build_menu_bar(self) -> None:
         menubar = tk.Menu(self.root)
@@ -334,6 +431,8 @@ class PixelFixGui:
         select_menu.add_cascade(label="Hue", menu=select_hue_menu)
         for label, mode in PALETTE_SELECT_HUE_OPTIONS:
             select_hue_menu.add_command(label=label, command=lambda value=mode: self.select_current_palette(value))
+        for label, mode in PALETTE_SELECT_SPECIAL_OPTIONS:
+            select_menu.add_command(label=label, command=lambda value=mode: self.select_current_palette(value))
         menubar.add_cascade(label="Select", menu=select_menu)
 
         zoom_menu = tk.Menu(menubar, tearoff=False)
@@ -445,6 +544,40 @@ class PixelFixGui:
         self.reduce_palette_button.pack(anchor=tk.W, pady=(8, 0))
         self.transparency_button = ttk.Button(palette_section, text="Make Transparent", command=self._toggle_transparency_pick_mode)
         self.transparency_button.pack(anchor=tk.W, pady=(8, 0))
+        brush_tool_row = ttk.Frame(palette_section)
+        brush_tool_row.pack(fill=tk.X, pady=(8, 0))
+        self.pencil_button = ttk.Button(brush_tool_row, text="Pencil", command=self._toggle_pencil_mode)
+        self.pencil_button.pack(side=tk.LEFT)
+        self.eraser_button = ttk.Button(brush_tool_row, text="Eraser", command=self._toggle_eraser_mode)
+        self.eraser_button.pack(side=tk.LEFT, padx=(6, 0))
+        brush_settings_row = ttk.Frame(palette_section)
+        brush_settings_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(brush_settings_row, text="Width").pack(side=tk.LEFT)
+        self.brush_width_spinbox = ttk.Spinbox(
+            brush_settings_row,
+            from_=1,
+            to=BRUSH_WIDTH_MAX,
+            textvariable=self.brush_width_var,
+            width=5,
+            command=self._on_brush_width_changed,
+        )
+        self.brush_width_spinbox.pack(side=tk.LEFT, padx=(8, 0))
+        self.brush_shape_square_button = ttk.Radiobutton(
+            brush_settings_row,
+            text="Square",
+            value=BRUSH_SHAPE_SQUARE,
+            variable=self.brush_shape_var,
+            command=self._on_brush_shape_changed,
+        )
+        self.brush_shape_square_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.brush_shape_round_button = ttk.Radiobutton(
+            brush_settings_row,
+            text="Round",
+            value=BRUSH_SHAPE_ROUND,
+            variable=self.brush_shape_var,
+            command=self._on_brush_shape_changed,
+        )
+        self.brush_shape_round_button.pack(side=tk.LEFT, padx=(6, 0))
         outline_row = ttk.Frame(palette_section)
         outline_row.pack(fill=tk.X, pady=(8, 0))
         self.add_outline_button = ttk.Button(outline_row, text="Add Outline", command=self._add_outline_from_selection)
@@ -458,13 +591,79 @@ class PixelFixGui:
             command=self._on_outline_pixel_perfect_changed,
         )
         self.outline_pixel_perfect_toggle.pack(side=tk.LEFT, padx=(10, 0))
-        self.outline_adaptive_toggle = ttk.Checkbutton(
-            outline_row,
-            text="Adaptive Colour",
-            variable=self.outline_adaptive_var,
-            command=self._on_outline_adaptive_changed,
+        outline_mode_row = ttk.Frame(palette_section)
+        outline_mode_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(outline_mode_row, text="Outline Colour").pack(side=tk.LEFT)
+        self.outline_palette_mode_button = ttk.Radiobutton(
+            outline_mode_row,
+            text="Selected Palette",
+            value=OUTLINE_COLOUR_MODE_PALETTE,
+            variable=self.outline_colour_mode_var,
+            command=self._on_outline_colour_mode_changed,
         )
-        self.outline_adaptive_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_palette_mode_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_adaptive_mode_button = ttk.Radiobutton(
+            outline_mode_row,
+            text="Adaptive",
+            value=OUTLINE_COLOUR_MODE_ADAPTIVE,
+            variable=self.outline_colour_mode_var,
+            command=self._on_outline_colour_mode_changed,
+        )
+        self.outline_adaptive_mode_button.pack(side=tk.LEFT, padx=(10, 0))
+        outline_adaptive_row = ttk.Frame(palette_section)
+        outline_adaptive_row.pack(fill=tk.X, pady=(6, 0))
+        self.outline_adaptive_darken_label = ttk.Label(outline_adaptive_row, text="Darken %")
+        self.outline_adaptive_darken_label.pack(side=tk.LEFT)
+        self.outline_adaptive_darken_spinbox = ttk.Spinbox(
+            outline_adaptive_row,
+            from_=0,
+            to=100,
+            textvariable=self.outline_adaptive_darken_percent_var,
+            width=5,
+            command=self._on_outline_adaptive_darken_changed,
+        )
+        self.outline_adaptive_darken_spinbox.pack(side=tk.LEFT, padx=(8, 0))
+        self.outline_add_generated_colours_toggle = ttk.Checkbutton(
+            outline_adaptive_row,
+            text="Add Generated Colours",
+            variable=self.outline_add_generated_colours_var,
+            command=self._on_outline_add_generated_colours_changed,
+        )
+        self.outline_add_generated_colours_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        outline_remove_filter_row = ttk.Frame(palette_section)
+        outline_remove_filter_row.pack(fill=tk.X, pady=(6, 0))
+        self.outline_remove_brightness_threshold_toggle = ttk.Checkbutton(
+            outline_remove_filter_row,
+            text="Brightness Threshold",
+            variable=self.outline_remove_brightness_threshold_enabled_var,
+            command=self._on_outline_remove_brightness_threshold_enabled_changed,
+        )
+        self.outline_remove_brightness_threshold_toggle.pack(side=tk.LEFT)
+        self.outline_remove_brightness_threshold_spinbox = ttk.Spinbox(
+            outline_remove_filter_row,
+            from_=0,
+            to=100,
+            textvariable=self.outline_remove_brightness_threshold_percent_var,
+            width=5,
+            command=self._on_outline_remove_brightness_threshold_percent_changed,
+        )
+        self.outline_remove_brightness_threshold_spinbox.pack(side=tk.LEFT, padx=(8, 0))
+        self.outline_remove_brightness_direction_dark_button = ttk.Radiobutton(
+            outline_remove_filter_row,
+            text="Dark",
+            value=OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK,
+            variable=self.outline_remove_brightness_threshold_direction_var,
+            command=self._on_outline_remove_brightness_threshold_direction_changed,
+        )
+        self.outline_remove_brightness_direction_dark_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_remove_brightness_direction_bright_button = ttk.Radiobutton(
+            outline_remove_filter_row,
+            text="Bright",
+            value=OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT,
+            variable=self.outline_remove_brightness_threshold_direction_var,
+            command=self._on_outline_remove_brightness_threshold_direction_changed,
+        )
+        self.outline_remove_brightness_direction_bright_button.pack(side=tk.LEFT, padx=(6, 0))
 
         adjust_section = self._create_section(sidebar, "4. Adjust palette")
         self.palette_adjustment_controls: list[tk.Scale] = []
@@ -574,10 +773,32 @@ class PixelFixGui:
         self.palette_reduction_spinbox.bind("<KeyRelease>", self._on_settings_changed, add="+")
         self.palette_reduction_spinbox.bind("<<Increment>>", self._on_settings_changed, add="+")
         self.palette_reduction_spinbox.bind("<<Decrement>>", self._on_settings_changed, add="+")
+        self.brush_width_spinbox.bind("<KeyRelease>", self._on_brush_width_changed, add="+")
+        self.brush_width_spinbox.bind("<<Increment>>", self._on_brush_width_changed, add="+")
+        self.brush_width_spinbox.bind("<<Decrement>>", self._on_brush_width_changed, add="+")
+        self.outline_adaptive_darken_spinbox.bind("<KeyRelease>", self._on_outline_adaptive_darken_changed, add="+")
+        self.outline_adaptive_darken_spinbox.bind("<<Increment>>", self._on_outline_adaptive_darken_changed, add="+")
+        self.outline_adaptive_darken_spinbox.bind("<<Decrement>>", self._on_outline_adaptive_darken_changed, add="+")
+        self.outline_remove_brightness_threshold_spinbox.bind(
+            "<KeyRelease>",
+            self._on_outline_remove_brightness_threshold_percent_changed,
+            add="+",
+        )
+        self.outline_remove_brightness_threshold_spinbox.bind(
+            "<<Increment>>",
+            self._on_outline_remove_brightness_threshold_percent_changed,
+            add="+",
+        )
+        self.outline_remove_brightness_threshold_spinbox.bind(
+            "<<Decrement>>",
+            self._on_outline_remove_brightness_threshold_percent_changed,
+            add="+",
+        )
 
         self._configure_primary_button(self.downsample_button)
         self._configure_primary_button(self.reduce_palette_button)
         self._update_palette_adjustment_labels()
+        self._refresh_outline_control_states()
         self._bind_shortcuts()
 
     def _create_section(self, parent: ttk.Frame, title: str) -> ttk.LabelFrame:
@@ -1016,6 +1237,9 @@ class PixelFixGui:
         self._palette_selection_anchor_index = indices[0] if indices else None
         self._update_palette_strip()
         self._refresh_action_states()
+        if mode == PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES and not indices:
+            self.process_status_var.set(f"No near-duplicate palette colours found at {threshold}%.")
+            return
         label = PALETTE_SELECT_LABELS[mode]
         count = len(indices)
         self.process_status_var.set(f"Selected {count} palette colour{'s' if count != 1 else ''} by {label} at {threshold}%.")
@@ -1080,16 +1304,102 @@ class PixelFixGui:
             return (list(current.display_palette_labels), current.stats.stage.title(), None)
         return None
 
-    def _set_pick_mode(self, mode: str | None) -> None:
-        self.palette_add_pick_mode = mode == "palette"
-        self.transparency_pick_mode = mode == "transparency"
+    @staticmethod
+    def _coerce_canvas_tool_mode(value: object) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if normalized in {
+            CANVAS_TOOL_MODE_PALETTE_PICK,
+            CANVAS_TOOL_MODE_TRANSPARENCY_PICK,
+            CANVAS_TOOL_MODE_PENCIL,
+            CANVAS_TOOL_MODE_ERASER,
+        }:
+            return normalized
+        return None
+
+    def _canvas_tool_mode_value(self) -> str | None:
+        mode = self._coerce_canvas_tool_mode(getattr(self, "canvas_tool_mode", None))
+        if mode is not None:
+            return mode
+        if getattr(self, "palette_add_pick_mode", False):
+            return CANVAS_TOOL_MODE_PALETTE_PICK
+        if getattr(self, "transparency_pick_mode", False):
+            return CANVAS_TOOL_MODE_TRANSPARENCY_PICK
+        return None
+
+    def _set_canvas_tool_mode(self, mode: str | None) -> None:
+        normalized = self._coerce_canvas_tool_mode(mode)
+        self.canvas_tool_mode = normalized
+        self.palette_add_pick_mode = normalized == CANVAS_TOOL_MODE_PALETTE_PICK
+        self.transparency_pick_mode = normalized == CANVAS_TOOL_MODE_TRANSPARENCY_PICK
+        self._reset_brush_stroke_state()
         self._set_pick_preview(None)
-        if mode == "palette":
+        if normalized == CANVAS_TOOL_MODE_PALETTE_PICK:
             self._set_view("original")
             self.process_status_var.set("Click the original preview to add a colour to the current palette.")
-        elif mode == "transparency":
+        elif normalized == CANVAS_TOOL_MODE_TRANSPARENCY_PICK:
             self._set_view("processed")
             self.process_status_var.set("Click the processed preview to remove a connected region.")
+        elif normalized == CANVAS_TOOL_MODE_PENCIL:
+            self._set_view("processed")
+            self.process_status_var.set("Click and drag on the processed preview to draw with the selected palette colour.")
+        elif normalized == CANVAS_TOOL_MODE_ERASER:
+            self._set_view("processed")
+            self.process_status_var.set("Click and drag on the processed preview to erase pixels to transparency.")
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None and hasattr(canvas, "configure") and not getattr(self, "dragging", False):
+            canvas.configure(cursor=self._cursor_for_pointer())
+
+    def _set_pick_mode(self, mode: str | None) -> None:
+        translated = {
+            "palette": CANVAS_TOOL_MODE_PALETTE_PICK,
+            "transparency": CANVAS_TOOL_MODE_TRANSPARENCY_PICK,
+            None: None,
+        }.get(mode, None)
+        self._set_canvas_tool_mode(translated)
+
+    def _brush_width(self) -> int:
+        variable = getattr(self, "brush_width_var", None)
+        if variable is None:
+            return BRUSH_WIDTH_DEFAULT
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = BRUSH_WIDTH_DEFAULT
+        return self._coerce_brush_width(value)
+
+    def _brush_shape(self) -> str:
+        variable = getattr(self, "brush_shape_var", None)
+        if variable is None:
+            return BRUSH_SHAPE_SQUARE
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = BRUSH_SHAPE_SQUARE
+        return self._coerce_brush_shape(value)
+
+    def _reset_brush_stroke_state(self) -> None:
+        self._brush_stroke_active = False
+        self._brush_stroke_last_point = None
+        self._brush_stroke_changed_pixels = 0
+        self._brush_stroke_tool_mode = None
+
+    @staticmethod
+    def _is_brush_tool_mode(mode: str | None) -> bool:
+        return mode in {CANVAS_TOOL_MODE_PENCIL, CANVAS_TOOL_MODE_ERASER}
+
+    def _brush_tool_mode_active(self) -> bool:
+        return self._is_brush_tool_mode(self._canvas_tool_mode_value())
+
+    @staticmethod
+    def _brush_tool_display_name(mode: str | None) -> str:
+        if mode == CANVAS_TOOL_MODE_ERASER:
+            return "Eraser"
+        return "Pencil"
+
+    def _selected_palette_brush_label(self) -> int | None:
+        return self._selected_palette_outline_label()
 
     def _editable_palette_labels(self) -> list[int]:
         palette, _source = self._get_display_palette()
@@ -1144,12 +1454,12 @@ class PixelFixGui:
         if self.original_display_image is None or self.image_state == "processing":
             self.process_status_var.set("Open an image before adding colours to the current palette.")
             return
-        self._set_pick_mode("palette")
+        self._set_canvas_tool_mode(CANVAS_TOOL_MODE_PALETTE_PICK)
         self._refresh_action_states()
 
     def _toggle_palette_add_pick_mode(self) -> None:
-        if self.palette_add_pick_mode:
-            self._set_pick_mode(None)
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_PALETTE_PICK:
+            self._set_canvas_tool_mode(None)
             self.process_status_var.set("Palette colour pick cancelled.")
         else:
             self._start_palette_add_pick_mode()
@@ -1178,11 +1488,41 @@ class PixelFixGui:
         if self._current_output_image() is None or self.image_state == "processing":
             self.process_status_var.set("Create a processed image before making colours transparent.")
             return
-        if self.transparency_pick_mode:
-            self._set_pick_mode(None)
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_TRANSPARENCY_PICK:
+            self._set_canvas_tool_mode(None)
             self.process_status_var.set("Transparency pick cancelled.")
         else:
-            self._set_pick_mode("transparency")
+            self._set_canvas_tool_mode(CANVAS_TOOL_MODE_TRANSPARENCY_PICK)
+        self._refresh_action_states()
+
+    def _start_pencil_mode(self) -> None:
+        if self._current_output_result() is None or self.image_state == "processing":
+            self.process_status_var.set("Create a processed image before drawing.")
+            return
+        if self._selected_palette_brush_label() is None:
+            self.process_status_var.set("Select exactly one palette colour to draw.")
+            return
+        self._set_canvas_tool_mode(CANVAS_TOOL_MODE_PENCIL)
+        self._refresh_action_states()
+
+    def _toggle_pencil_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_PENCIL:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Pencil cancelled.")
+        else:
+            self._start_pencil_mode()
+            return
+        self._refresh_action_states()
+
+    def _toggle_eraser_mode(self) -> None:
+        if self._current_output_result() is None or self.image_state == "processing":
+            self.process_status_var.set("Create a processed image before erasing.")
+            return
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_ERASER:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Eraser cancelled.")
+        else:
+            self._set_canvas_tool_mode(CANVAS_TOOL_MODE_ERASER)
         self._refresh_action_states()
 
     def _merge_selected_palette_colors(self) -> None:
@@ -1243,9 +1583,10 @@ class PixelFixGui:
         return self._current_adjusted_structured_palette()
 
     def _active_pick_view(self) -> str | None:
-        if self.palette_add_pick_mode:
+        mode = self._canvas_tool_mode_value()
+        if mode == CANVAS_TOOL_MODE_PALETTE_PICK:
             return "original"
-        if self.transparency_pick_mode:
+        if mode == CANVAS_TOOL_MODE_TRANSPARENCY_PICK:
             return "processed"
         return None
 
@@ -1331,6 +1672,92 @@ class PixelFixGui:
         self._refresh_action_states()
         return True
 
+    def _apply_brush_stroke(self, image_x: int, image_y: int) -> int:
+        current = self._current_output_result()
+        if current is None:
+            return 0
+        mode = getattr(self, "_brush_stroke_tool_mode", None) or self._canvas_tool_mode_value()
+        width = self._brush_width()
+        shape = self._brush_shape()
+        if mode == CANVAS_TOOL_MODE_PENCIL:
+            label = self._selected_palette_brush_label()
+            if label is None:
+                return 0
+            updated, changed = apply_pencil_operation(current, image_x, image_y, label, width=width, shape=shape)
+        elif mode == CANVAS_TOOL_MODE_ERASER:
+            updated, changed = apply_eraser_operation(current, image_x, image_y, width=width, shape=shape)
+        else:
+            return 0
+        if changed <= 0:
+            return 0
+        self.transparent_colors = set()
+        self._set_current_output_result(updated)
+        self._refresh_output_display_images()
+        self.redraw_canvas()
+        return changed
+
+    def _refresh_current_output_display_image(self) -> None:
+        current = self._current_output_result()
+        updated_image = self._build_output_display_image(current)
+        if getattr(self, "palette_result", None) is not None:
+            self.palette_display_image = updated_image
+        else:
+            self.downsample_display_image = updated_image
+
+    def _apply_brush_segment(self, points: list[tuple[int, int]]) -> int:
+        current = self._current_output_result()
+        if current is None or not points:
+            return 0
+        mode = getattr(self, "_brush_stroke_tool_mode", None) or self._canvas_tool_mode_value()
+        width = self._brush_width()
+        shape = self._brush_shape()
+        if mode == CANVAS_TOOL_MODE_PENCIL:
+            label = self._selected_palette_brush_label()
+            if label is None:
+                return 0
+            updated, changed = apply_pencil_operations(current, points, label=label, width=width, shape=shape)
+        elif mode == CANVAS_TOOL_MODE_ERASER:
+            updated, changed = apply_eraser_operations(current, points, width=width, shape=shape)
+        else:
+            return 0
+        if changed <= 0:
+            return 0
+        self.transparent_colors = set()
+        self._set_current_output_result(updated)
+        self._refresh_current_output_display_image()
+        self.redraw_canvas()
+        return changed
+
+    @staticmethod
+    def _interpolate_brush_points(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+        x0, y0 = start
+        x1, y1 = end
+        delta_x = abs(x1 - x0)
+        delta_y = abs(y1 - y0)
+        step_x = 1 if x0 < x1 else -1
+        step_y = 1 if y0 < y1 else -1
+        error = delta_x - delta_y
+        points: list[tuple[int, int]] = []
+        while True:
+            points.append((x0, y0))
+            if x0 == x1 and y0 == y1:
+                return points
+            doubled_error = error * 2
+            if doubled_error > -delta_y:
+                error -= delta_y
+                x0 += step_x
+            if doubled_error < delta_x:
+                error += delta_x
+                y0 += step_y
+
+    def _record_brush_stroke(self, image_x: int, image_y: int) -> None:
+        last_point = getattr(self, "_brush_stroke_last_point", None)
+        points = [(image_x, image_y)] if last_point is None else self._interpolate_brush_points(last_point, (image_x, image_y))
+        changed = self._apply_brush_segment(points)
+        if isinstance(changed, int) and changed > 0:
+            self._brush_stroke_changed_pixels += changed
+        self._brush_stroke_last_point = (image_x, image_y)
+
     def _selected_palette_outline_label(self) -> int | None:
         displayed = getattr(self, "_displayed_palette", [])
         selected = sorted(index for index in getattr(self, "_palette_selection_indices", set()) if 0 <= index < len(displayed))
@@ -1347,14 +1774,159 @@ class PixelFixGui:
             return bool(getter())
         return bool(variable)
 
+    def _outline_colour_mode(self) -> str:
+        variable = getattr(self, "outline_colour_mode_var", None)
+        if variable is None:
+            return OUTLINE_COLOUR_MODE_PALETTE
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = OUTLINE_COLOUR_MODE_PALETTE
+        return self._coerce_outline_colour_mode(value)
+
     def _outline_adaptive_enabled(self) -> bool:
-        variable = getattr(self, "outline_adaptive_var", None)
+        return self._outline_colour_mode() == OUTLINE_COLOUR_MODE_ADAPTIVE
+
+    def _outline_adaptive_darken_percent(self) -> int:
+        variable = getattr(self, "outline_adaptive_darken_percent_var", None)
+        if variable is None:
+            return OUTLINE_ADAPTIVE_DARKEN_DEFAULT
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = OUTLINE_ADAPTIVE_DARKEN_DEFAULT
+        return self._coerce_outline_adaptive_darken_percent(value)
+
+    def _outline_add_generated_colours_enabled(self) -> bool:
+        variable = getattr(self, "outline_add_generated_colours_var", None)
         if variable is None:
             return False
         getter = getattr(variable, "get", None)
         if callable(getter):
-            return bool(getter())
+            try:
+                return bool(getter())
+            except Exception:
+                return False
         return bool(variable)
+
+    def _outline_remove_brightness_threshold_enabled(self) -> bool:
+        variable = getattr(self, "outline_remove_brightness_threshold_enabled_var", None)
+        if variable is None:
+            return False
+        getter = getattr(variable, "get", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(variable)
+
+    def _outline_remove_brightness_threshold_percent(self) -> int:
+        variable = getattr(self, "outline_remove_brightness_threshold_percent_var", None)
+        if variable is None:
+            return OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT
+        return self._coerce_outline_remove_brightness_threshold_percent(value)
+
+    def _outline_remove_brightness_threshold_direction(self) -> str:
+        variable = getattr(self, "outline_remove_brightness_threshold_direction_var", None)
+        if variable is None:
+            return OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK
+        return self._coerce_outline_remove_brightness_direction(value)
+
+    def _outline_remove_brightness_threshold_description(self) -> str:
+        direction = self._outline_remove_brightness_threshold_direction()
+        threshold = self._outline_remove_brightness_threshold_percent()
+        return f"{direction} brightness threshold at {threshold}%"
+
+    def _refresh_brush_control_states(self) -> None:
+        busy = getattr(self, "image_state", "") == "processing"
+        has_output = self._current_output_result() is not None if hasattr(self, "_current_output_result") else False
+        can_erase = has_output and not busy
+        can_draw = can_erase and (self._selected_palette_brush_label() is not None if hasattr(self, "_selected_palette_brush_label") else False)
+        tool_mode = self._canvas_tool_mode_value()
+        for widget_name, enabled in (
+            ("pencil_button", can_draw),
+            ("eraser_button", can_erase),
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and hasattr(widget, "configure"):
+                widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        spinbox = getattr(self, "brush_width_spinbox", None)
+        if spinbox is not None and hasattr(spinbox, "configure"):
+            spinbox.configure(state="normal" if can_erase else "disabled")
+        for widget_name in ("brush_shape_square_button", "brush_shape_round_button"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and hasattr(widget, "configure"):
+                widget.configure(state=tk.NORMAL if can_erase else tk.DISABLED)
+        pencil = getattr(self, "pencil_button", None)
+        if pencil is not None and hasattr(pencil, "configure"):
+            pencil.configure(text="Cancel Pencil" if tool_mode == CANVAS_TOOL_MODE_PENCIL else "Pencil")
+        eraser = getattr(self, "eraser_button", None)
+        if eraser is not None and hasattr(eraser, "configure"):
+            eraser.configure(text="Cancel Eraser" if tool_mode == CANVAS_TOOL_MODE_ERASER else "Eraser")
+
+    def _refresh_outline_control_states(self) -> None:
+        adaptive = self._outline_adaptive_enabled()
+        remove_threshold = self._outline_remove_brightness_threshold_enabled()
+        busy = getattr(self, "image_state", "") == "processing"
+        has_output = self._current_output_result() is not None if hasattr(self, "_current_output_result") else False
+        mode_state = tk.NORMAL if has_output and not busy else tk.DISABLED
+        adaptive_state = "normal" if adaptive and has_output and not busy else "disabled"
+        remove_threshold_toggle_state = tk.NORMAL if has_output and not busy else tk.DISABLED
+        remove_threshold_state = "normal" if remove_threshold and has_output and not busy else "disabled"
+        for widget_name in ("outline_palette_mode_button", "outline_adaptive_mode_button"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and hasattr(widget, "configure"):
+                widget.configure(state=mode_state)
+        toggle = getattr(self, "outline_add_generated_colours_toggle", None)
+        if toggle is not None and hasattr(toggle, "configure"):
+            toggle.configure(state=tk.NORMAL if adaptive and has_output and not busy else tk.DISABLED)
+        spinbox = getattr(self, "outline_adaptive_darken_spinbox", None)
+        if spinbox is not None and hasattr(spinbox, "configure"):
+            spinbox.configure(state=adaptive_state)
+        remove_toggle = getattr(self, "outline_remove_brightness_threshold_toggle", None)
+        if remove_toggle is not None and hasattr(remove_toggle, "configure"):
+            remove_toggle.configure(state=remove_threshold_toggle_state)
+        remove_spinbox = getattr(self, "outline_remove_brightness_threshold_spinbox", None)
+        if remove_spinbox is not None and hasattr(remove_spinbox, "configure"):
+            remove_spinbox.configure(state=remove_threshold_state)
+        for widget_name in (
+            "outline_remove_brightness_direction_dark_button",
+            "outline_remove_brightness_direction_bright_button",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and hasattr(widget, "configure"):
+                widget.configure(state=remove_threshold_state)
+
+    def _on_brush_width_changed(self, _event: tk.Event | None = None) -> None:
+        width = self._brush_width()
+        variable = getattr(self, "brush_width_var", None)
+        getter = getattr(variable, "get", None)
+        setter = getattr(variable, "set", None)
+        if variable is not None and callable(getter) and callable(setter) and getter() != width:
+            setter(width)
+        self._schedule_state_persist()
+
+    def _on_brush_shape_changed(self) -> None:
+        shape = self._brush_shape()
+        variable = getattr(self, "brush_shape_var", None)
+        getter = getattr(variable, "get", None)
+        setter = getattr(variable, "set", None)
+        if variable is not None and callable(getter) and callable(setter) and getter() != shape:
+            setter(shape)
+        self._schedule_state_persist()
 
     def _set_current_output_result(self, result: ProcessResult) -> None:
         if getattr(self, "palette_result", None) is not None:
@@ -1374,12 +1946,15 @@ class PixelFixGui:
                 self.process_status_var.set("Select exactly one palette colour to add an outline.")
                 return
         pixel_perfect = self._outline_pixel_perfect_enabled()
-        updated, changed = add_exterior_outline(
+        darken_percent = self._outline_adaptive_darken_percent()
+        updated, changed, generated_labels = add_exterior_outline(
             current,
             outline_label if outline_label is not None else 0,
             transparent_labels=getattr(self, "transparent_colors", set()),
             pixel_perfect=pixel_perfect,
             adaptive=adaptive,
+            adaptive_darken_percent=darken_percent,
+            workspace=getattr(self, "workspace", None),
         )
         if changed <= 0:
             if adaptive:
@@ -1393,18 +1968,43 @@ class PixelFixGui:
                 self.process_status_var.set("No exterior outline pixels were available to add.")
             return
         self._capture_palette_undo_state()
+        appended_count = 0
         self.transparent_colors = set()
         self._set_current_output_result(updated)
+        if adaptive and self._outline_add_generated_colours_enabled():
+            editable_palette = self._editable_palette_labels()
+            if editable_palette:
+                existing = set(editable_palette)
+                appended_labels = [label for label in generated_labels if label not in existing]
+                if appended_labels:
+                    previous_selection = set(getattr(self, "_palette_selection_indices", set()))
+                    previous_anchor = getattr(self, "_palette_selection_anchor_index", None)
+                    self._set_active_palette(editable_palette + appended_labels, "Edited Palette", None)
+                    self._palette_selection_indices = {
+                        index for index in previous_selection if 0 <= index < len(getattr(self, "active_palette", []) or [])
+                    }
+                    anchor = previous_anchor if isinstance(previous_anchor, int) else None
+                    self._palette_selection_anchor_index = (
+                        anchor if anchor is not None and 0 <= anchor < len(getattr(self, "active_palette", []) or []) else None
+                    )
+                    appended_count = len(appended_labels)
         self._refresh_output_display_images()
         self._set_view("processed")
         if adaptive:
+            palette_clause = (
+                f" Added {appended_count} generated palette colour{'s' if appended_count != 1 else ''} to the current palette."
+                if appended_count
+                else ""
+            )
             if pixel_perfect:
                 self.process_status_var.set(
-                    f"Added adaptive pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                    f"Added adaptive pixel-perfect outline to {changed} pixel{'s' if changed != 1 else ''} at {darken_percent}% darkening."
+                    f"{palette_clause} Press Undo to restore it."
                 )
             else:
                 self.process_status_var.set(
-                    f"Added adaptive outline to {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                    f"Added adaptive outline to {changed} pixel{'s' if changed != 1 else ''} at {darken_percent}% darkening."
+                    f"{palette_clause} Press Undo to restore it."
                 )
         elif pixel_perfect:
             self.process_status_var.set(
@@ -1424,13 +2024,29 @@ class PixelFixGui:
         if current is None or self.image_state == "processing":
             return
         pixel_perfect = self._outline_pixel_perfect_enabled()
+        brightness_threshold_enabled = self._outline_remove_brightness_threshold_enabled()
+        brightness_threshold_percent = self._outline_remove_brightness_threshold_percent()
+        brightness_threshold_direction = self._outline_remove_brightness_threshold_direction()
         updated, changed = remove_exterior_outline(
             current,
             transparent_labels=getattr(self, "transparent_colors", set()),
             pixel_perfect=pixel_perfect,
+            brightness_threshold_enabled=brightness_threshold_enabled,
+            brightness_threshold_percent=brightness_threshold_percent,
+            brightness_threshold_direction=brightness_threshold_direction,
+            workspace=getattr(self, "workspace", None),
         )
         if changed <= 0:
-            if pixel_perfect:
+            if brightness_threshold_enabled:
+                if pixel_perfect:
+                    self.process_status_var.set(
+                        f"No pixel-perfect edge pixels met the {self._outline_remove_brightness_threshold_description()}."
+                    )
+                else:
+                    self.process_status_var.set(
+                        f"No exterior outline pixels met the {self._outline_remove_brightness_threshold_description()}."
+                    )
+            elif pixel_perfect:
                 self.process_status_var.set("No pixel-perfect edge pixels were found to remove.")
             else:
                 self.process_status_var.set("No exterior outline pixels were found to remove.")
@@ -1440,7 +2056,18 @@ class PixelFixGui:
         self._set_current_output_result(updated)
         self._refresh_output_display_images()
         self._set_view("processed")
-        if pixel_perfect:
+        if brightness_threshold_enabled:
+            if pixel_perfect:
+                self.process_status_var.set(
+                    f"Removed {changed} pixel-perfect edge pixel{'s' if changed != 1 else ''} using the "
+                    f"{self._outline_remove_brightness_threshold_description()}. Press Undo to restore it."
+                )
+            else:
+                self.process_status_var.set(
+                    f"Removed {changed} outline pixel{'s' if changed != 1 else ''} using the "
+                    f"{self._outline_remove_brightness_threshold_description()}. Press Undo to restore it."
+                )
+        elif pixel_perfect:
             self.process_status_var.set(
                 f"Removed {changed} pixel-perfect edge pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
             )
@@ -1958,20 +2585,34 @@ class PixelFixGui:
         return max(1, min(target, unique_count))
 
     def _on_canvas_press(self, event: tk.Event) -> None:
-        if self.palette_add_pick_mode:
+        mode = self._canvas_tool_mode_value()
+        if mode == CANVAS_TOOL_MODE_PALETTE_PICK:
             sampled = self._sample_label_from_preview(event.x, event.y, view="original")
             if sampled is not None:
                 self._add_colour_to_current_palette(sampled)
-                self._set_pick_mode(None)
+                self._set_canvas_tool_mode(None)
                 self._refresh_action_states()
             return
-        if self.transparency_pick_mode:
+        if mode == CANVAS_TOOL_MODE_TRANSPARENCY_PICK:
             sampled = self._sample_point_from_preview(event.x, event.y, view="processed")
             if sampled is not None:
                 image_x, image_y, label = sampled
                 self._add_transparent_region(image_x, image_y, label)
-                self._set_pick_mode(None)
+                self._set_canvas_tool_mode(None)
                 self._refresh_action_states()
+            return
+        if self._is_brush_tool_mode(mode):
+            coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
+            if coordinates is None:
+                return
+            image_x, image_y = coordinates
+            self._brush_stroke_active = True
+            self._brush_stroke_tool_mode = mode
+            self._brush_stroke_last_point = None
+            self._brush_stroke_changed_pixels = 0
+            self._capture_palette_undo_state()
+            self._record_brush_stroke(image_x, image_y)
+            self.canvas.configure(cursor="crosshair")
             return
         if not self._point_is_over_image(event.x, event.y):
             return
@@ -1981,6 +2622,13 @@ class PixelFixGui:
         self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
 
     def _on_canvas_drag(self, event: tk.Event) -> None:
+        if getattr(self, "_brush_stroke_active", False) and self._is_brush_tool_mode(getattr(self, "_brush_stroke_tool_mode", None)):
+            coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
+            if coordinates is None:
+                return
+            image_x, image_y = coordinates
+            self._record_brush_stroke(image_x, image_y)
+            return
         if not self.dragging or self._display_context is None:
             return
         canvas_width = max(1, self.canvas.winfo_width())
@@ -1992,13 +2640,32 @@ class PixelFixGui:
         self.redraw_canvas()
 
     def _on_canvas_release(self, _event: tk.Event) -> None:
+        if getattr(self, "_brush_stroke_active", False):
+            changed = int(getattr(self, "_brush_stroke_changed_pixels", 0) or 0)
+            if changed > 0:
+                mode = getattr(self, "_brush_stroke_tool_mode", None)
+                tool_name = self._brush_tool_display_name(mode)
+                self.process_status_var.set(
+                    f"{tool_name} changed {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                )
+                self._refresh_action_states()
+            else:
+                clear_undo = getattr(self, "_clear_palette_undo_state", None)
+                if callable(clear_undo):
+                    clear_undo()
+            self._reset_brush_stroke_state()
+            self.canvas.configure(cursor=self._cursor_for_pointer())
+            return
         self.dragging = False
         self.canvas.configure(cursor=self._cursor_for_pointer())
 
     def _on_canvas_motion(self, event: tk.Event) -> None:
         if self.dragging:
             self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
-        elif self.palette_add_pick_mode or self.transparency_pick_mode:
+        elif self._brush_tool_mode_active():
+            self._set_pick_preview(None)
+            self.canvas.configure(cursor="crosshair")
+        elif self._active_pick_view() is not None:
             self.canvas.configure(cursor="crosshair")
             self._update_pick_preview(event.x, event.y)
         else:
@@ -2023,7 +2690,7 @@ class PixelFixGui:
         self.redraw_canvas()
 
     def _cursor_for_pointer(self) -> str:
-        if self.palette_add_pick_mode or self.transparency_pick_mode:
+        if self._canvas_tool_mode_value() is not None:
             return "crosshair"
         return OPEN_HAND_CURSOR if self._point_is_over_image() else ""
 
@@ -2456,26 +3123,36 @@ class PixelFixGui:
         can_merge_palette = has_palette_source and len(valid_palette_selection) >= 2 and not busy
         can_ramp_palette = has_palette_source and len(valid_palette_selection) >= 1 and not busy
         can_undo = (self._palette_undo_state is not None) or self.session.history.can_undo()
-        for widget, enabled in (
-            (self.downsample_button, has_image and not busy),
-            (self.generate_override_palette_button, has_downsample and not busy),
-            (self.reduce_palette_button, has_downsample and not busy and has_palette_source),
-            (self.transparency_button, has_output and not busy),
-            (self.add_outline_button, has_output and not busy and (adaptive_outline or has_single_palette_selection)),
-            (self.remove_outline_button, has_output and not busy),
-            (self.zoom_in_button, has_image and not busy),
-            (self.zoom_out_button, has_image and not busy),
-            (self.add_palette_color_button, has_image and not busy),
-            (self.merge_palette_button, can_merge_palette),
-            (self.ramp_palette_button, can_ramp_palette),
-            (self.select_all_palette_button, has_palette_source and not busy),
-            (self.clear_palette_selection_button, has_palette_selection and not busy),
-            (self.remove_palette_color_button, has_palette_source and has_palette_selection and not busy),
+        for widget_name, enabled in (
+            ("downsample_button", has_image and not busy),
+            ("generate_override_palette_button", has_downsample and not busy),
+            ("reduce_palette_button", has_downsample and not busy and has_palette_source),
+            ("transparency_button", has_output and not busy),
+            ("add_outline_button", has_output and not busy and (adaptive_outline or has_single_palette_selection)),
+            ("remove_outline_button", has_output and not busy),
+            ("zoom_in_button", has_image and not busy),
+            ("zoom_out_button", has_image and not busy),
+            ("add_palette_color_button", has_image and not busy),
+            ("merge_palette_button", can_merge_palette),
+            ("ramp_palette_button", can_ramp_palette),
+            ("select_all_palette_button", has_palette_source and not busy),
+            ("clear_palette_selection_button", has_palette_selection and not busy),
+            ("remove_palette_color_button", has_palette_source and has_palette_selection and not busy),
         ):
-            widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
-        self.transparency_button.configure(text="Cancel Transparency" if self.transparency_pick_mode else "Make Transparent")
-        self.pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
-        self.palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+            widget = getattr(self, widget_name, None)
+            if widget is not None and hasattr(widget, "configure"):
+                widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        transparency_button = getattr(self, "transparency_button", None)
+        if transparency_button is not None and hasattr(transparency_button, "configure"):
+            transparency_button.configure(
+                text="Cancel Transparency" if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_TRANSPARENCY_PICK else "Make Transparent"
+            )
+        pixel_width_spinbox = getattr(self, "pixel_width_spinbox", None)
+        if pixel_width_spinbox is not None and hasattr(pixel_width_spinbox, "configure"):
+            pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+        palette_reduction_spinbox = getattr(self, "palette_reduction_spinbox", None)
+        if palette_reduction_spinbox is not None and hasattr(palette_reduction_spinbox, "configure"):
+            palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
         adjustment_state = tk.NORMAL if has_palette_source and not busy else tk.DISABLED
         for control in getattr(self, "palette_adjustment_controls", []):
             control.configure(state=adjustment_state)
@@ -2504,6 +3181,8 @@ class PixelFixGui:
         self._menu_items["preferences"].entryconfigure("Colour Ramp", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Dithering Method", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Selection Threshold", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._refresh_brush_control_states()
+        self._refresh_outline_control_states()
         self._refresh_primary_button_style(self.downsample_button)
         self._refresh_primary_button_style(self.reduce_palette_button)
 
@@ -2524,7 +3203,43 @@ class PixelFixGui:
     def _on_outline_pixel_perfect_changed(self) -> None:
         self._schedule_state_persist()
 
-    def _on_outline_adaptive_changed(self) -> None:
+    def _on_outline_colour_mode_changed(self) -> None:
+        mode = self._outline_colour_mode()
+        if getattr(self, "outline_colour_mode_var", None) is not None and self.outline_colour_mode_var.get() != mode:
+            self.outline_colour_mode_var.set(mode)
+        self._refresh_outline_control_states()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
+    def _on_outline_adaptive_darken_changed(self, _event: tk.Event | None = None) -> None:
+        percent = self._outline_adaptive_darken_percent()
+        if getattr(self, "outline_adaptive_darken_percent_var", None) is not None and self.outline_adaptive_darken_percent_var.get() != percent:
+            self.outline_adaptive_darken_percent_var.set(percent)
+        self._schedule_state_persist()
+
+    def _on_outline_add_generated_colours_changed(self) -> None:
+        self._schedule_state_persist()
+
+    def _on_outline_remove_brightness_threshold_enabled_changed(self) -> None:
+        self._refresh_outline_control_states()
+        self._schedule_state_persist()
+
+    def _on_outline_remove_brightness_threshold_percent_changed(self, _event: tk.Event | None = None) -> None:
+        threshold = self._outline_remove_brightness_threshold_percent()
+        variable = getattr(self, "outline_remove_brightness_threshold_percent_var", None)
+        getter = getattr(variable, "get", None)
+        setter = getattr(variable, "set", None)
+        if variable is not None and callable(getter) and callable(setter) and getter() != threshold:
+            setter(threshold)
+        self._schedule_state_persist()
+
+    def _on_outline_remove_brightness_threshold_direction_changed(self) -> None:
+        direction = self._outline_remove_brightness_threshold_direction()
+        variable = getattr(self, "outline_remove_brightness_threshold_direction_var", None)
+        getter = getattr(variable, "get", None)
+        setter = getattr(variable, "set", None)
+        if variable is not None and callable(getter) and callable(setter) and getter() != direction:
+            setter(direction)
         self._schedule_state_persist()
 
     def _schedule_state_persist(self) -> None:
@@ -2546,7 +3261,14 @@ class PixelFixGui:
                 "selection_threshold": self._selection_threshold_percent(),
                 "checkerboard": self.checkerboard_var.get(),
                 "outline_pixel_perfect": self._outline_pixel_perfect_enabled(),
-                "outline_adaptive": self._outline_adaptive_enabled(),
+                "outline_colour_mode": self._outline_colour_mode(),
+                "outline_adaptive_darken_percent": self._outline_adaptive_darken_percent(),
+                "outline_add_generated_colours": self._outline_add_generated_colours_enabled(),
+                "outline_remove_brightness_threshold_enabled": self._outline_remove_brightness_threshold_enabled(),
+                "outline_remove_brightness_threshold_percent": self._outline_remove_brightness_threshold_percent(),
+                "outline_remove_brightness_threshold_direction": self._outline_remove_brightness_threshold_direction(),
+                "brush_width": self._brush_width(),
+                "brush_shape": self._brush_shape(),
                 "view_mode": self.view_var.get(),
                 "recent_files": self.recent_files,
             }

@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from pixel_fix.io import copy_as_placeholder, validate_input_path, validate_output_path
+from PIL import Image
+
+from pixel_fix.io import validate_input_path, validate_output_path
 from pixel_fix.palette.advanced import (
     generate_structured_palette,
     map_palette_to_labels,
@@ -224,4 +226,22 @@ class PixelFixPipeline:
     def run_file(self, input_path: Path, output_path: Path) -> None:
         validate_input_path(input_path)
         validate_output_path(output_path, overwrite=self.config.overwrite)
-        copy_as_placeholder(input_path, output_path)
+        with Image.open(input_path) as image:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            pixels = list(rgb.getdata())
+        labels = [
+            [((red << 16) | (green << 8) | blue) for (red, green, blue) in pixels[index : index + width]]
+            for index in range(0, width * height, width)
+        ] if height else []
+        result = self.run_on_labels_detailed(labels)
+        output_image = Image.new("RGB", (len(result.labels[0]) if result.labels else 0, len(result.labels)))
+        if result.labels:
+            output_image.putdata(
+                [
+                    ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+                    for row in result.labels
+                    for value in row
+                ]
+            )
+        output_image.save(output_path)

@@ -4,7 +4,9 @@ from colorsys import rgb_to_hsv
 from dataclasses import dataclass
 from math import ceil, cos, pi, sqrt
 
-from pixel_fix.palette.workspace import ColorWorkspace
+import numpy as np
+
+from pixel_fix.palette.workspace import ColorWorkspace, hyab_distance
 
 PALETTE_SORT_LIGHTNESS = "lightness"
 PALETTE_SORT_HUE = "hue"
@@ -42,6 +44,7 @@ PALETTE_SELECT_HUE_GREEN = "hue-green"
 PALETTE_SELECT_HUE_CYAN = "hue-cyan"
 PALETTE_SELECT_HUE_BLUE = "hue-blue"
 PALETTE_SELECT_HUE_MAGENTA = "hue-magenta"
+PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES = "similarity-near-duplicates"
 
 PALETTE_SELECT_DIRECT_MODES = (
     PALETTE_SELECT_LIGHTNESS_DARK,
@@ -63,7 +66,9 @@ PALETTE_SELECT_HUE_MODES = (
     PALETTE_SELECT_HUE_MAGENTA,
 )
 
-PALETTE_SELECT_MODES = PALETTE_SELECT_DIRECT_MODES + PALETTE_SELECT_HUE_MODES
+PALETTE_SELECT_SPECIAL_MODES = (PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES,)
+
+PALETTE_SELECT_MODES = PALETTE_SELECT_DIRECT_MODES + PALETTE_SELECT_HUE_MODES + PALETTE_SELECT_SPECIAL_MODES
 
 PALETTE_SELECT_LABELS = {
     PALETTE_SELECT_LIGHTNESS_DARK: "Lightness (Dark)",
@@ -80,11 +85,15 @@ PALETTE_SELECT_LABELS = {
     PALETTE_SELECT_HUE_CYAN: "Hue (Cyan)",
     PALETTE_SELECT_HUE_BLUE: "Hue (Blue)",
     PALETTE_SELECT_HUE_MAGENTA: "Hue (Magenta)",
+    PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES: "Similarity (Near-Duplicates)",
 }
 
 _NEUTRAL_SATURATION_EPSILON = 0.02
 _NEUTRAL_CHROMA_EPSILON = 0.015
 _WARM_HUE_CENTER = pi / 6.0
+_SELECTION_THRESHOLD_OPTIONS = tuple(range(10, 101, 10))
+_SIMILARITY_MIN_CUTOFF = 0.004
+_SIMILARITY_MAX_CUTOFF = 0.060
 _HUE_BUCKET_CENTERS = {
     PALETTE_SELECT_HUE_RED: 0.0,
     PALETTE_SELECT_HUE_YELLOW: pi / 3.0,
@@ -123,6 +132,8 @@ def select_palette_indices(labels: list[int], mode: str, threshold_percent: int,
         raise ValueError(f"Unsupported palette selection mode: {mode}")
     if not labels:
         return []
+    if mode == PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES:
+        return _select_similarity_palette_indices(labels, threshold_percent, workspace)
     metrics = _palette_metrics(labels, workspace)
     target_count = max(1, ceil(len(labels) * (max(0.0, min(100.0, float(threshold_percent))) / 100.0)))
     ranked = _selection_ranking(metrics, mode)
@@ -207,6 +218,65 @@ def _selection_ranking(metrics: list[_PaletteSortMetrics], mode: str) -> list[_P
         eligible,
         key=lambda metric: (_circular_hue_distance(metric.hue, center), -metric.saturation, -metric.chroma, metric.index),
     )
+
+
+def _select_similarity_palette_indices(labels: list[int], threshold_percent: int, workspace: ColorWorkspace) -> list[int]:
+    if len(labels) < 2:
+        return []
+
+    cutoff = _similarity_cutoff(threshold_percent)
+    oklab = workspace.labels_to_oklab(np.asarray(labels, dtype=np.int64))
+    distances = hyab_distance(oklab[:, None, :], oklab[None, :, :]).astype(np.float64, copy=False)
+
+    candidate_clusters: list[tuple[int, ...]] = []
+    for left_index in range(len(labels) - 1):
+        for right_index in range(left_index + 1, len(labels)):
+            if float(distances[left_index, right_index]) > cutoff:
+                continue
+            candidate_clusters.append(_expand_similarity_cluster(left_index, right_index, distances, cutoff))
+
+    if not candidate_clusters:
+        return []
+
+    best_cluster = min(candidate_clusters, key=lambda cluster: _similarity_cluster_sort_key(cluster, distances))
+    return list(best_cluster)
+
+
+def _coerce_selection_threshold_percent(value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 30
+    parsed = max(0, min(100, parsed))
+    return min(_SELECTION_THRESHOLD_OPTIONS, key=lambda candidate: abs(candidate - parsed))
+
+
+def _similarity_cutoff(threshold_percent: int) -> float:
+    threshold = _coerce_selection_threshold_percent(threshold_percent)
+    weight = (threshold - 10) / 90.0
+    return _SIMILARITY_MIN_CUTOFF + (weight * (_SIMILARITY_MAX_CUTOFF - _SIMILARITY_MIN_CUTOFF))
+
+
+def _expand_similarity_cluster(seed_left: int, seed_right: int, distances: np.ndarray, cutoff: float) -> tuple[int, ...]:
+    cluster_members = {seed_left, seed_right}
+    for candidate_index in range(distances.shape[0]):
+        if candidate_index in cluster_members:
+            continue
+        if all(float(distances[candidate_index, member_index]) <= cutoff for member_index in cluster_members):
+            cluster_members.add(candidate_index)
+    return tuple(sorted(cluster_members))
+
+
+def _similarity_cluster_sort_key(cluster: tuple[int, ...], distances: np.ndarray) -> tuple[object, ...]:
+    return (-len(cluster), _mean_internal_distance(cluster, distances), min(cluster), cluster)
+
+
+def _mean_internal_distance(cluster: tuple[int, ...], distances: np.ndarray) -> float:
+    if len(cluster) < 2:
+        return 0.0
+    subset = distances[np.ix_(cluster, cluster)]
+    upper = subset[np.triu_indices(len(cluster), k=1)]
+    return float(np.mean(upper)) if upper.size else 0.0
 
 
 def _circular_hue_distance(left: float, right: float) -> float:

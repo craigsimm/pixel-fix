@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from pixel_fix.gui.app import PixelFixGui
-from pixel_fix.palette.sort import PALETTE_SORT_LIGHTNESS
+from pixel_fix.palette.sort import (
+    PALETTE_SELECT_LABELS,
+    PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES,
+    PALETTE_SORT_LIGHTNESS,
+)
 
 
 def _write_gpl(path: Path, *entries: tuple[int, int, int, str]) -> None:
@@ -91,6 +95,13 @@ def test_builtin_palette_menu_uses_catalog_tree(monkeypatch, tmp_path: Path) -> 
         assert "Palette Reduction Method" in preference_labels
         assert "Colour Ramp" in preference_labels
         assert "Dithering Method" in preference_labels
+        select_menu = gui._menu_items["select"]
+        select_labels = [select_menu.entrycget(index, "label") for index in range(select_menu.index("end") + 1)]
+        similarity_label = PALETTE_SELECT_LABELS[PALETTE_SELECT_SIMILARITY_NEAR_DUPLICATES]
+        assert "Hue" in select_labels
+        assert similarity_label in select_labels
+        assert select_labels.index("Hue") < select_labels.index(similarity_label)
+        assert gui._menu_bar.entrycget("Select", "state") == "disabled"
     finally:
         gui.root.destroy()
 
@@ -104,6 +115,7 @@ def test_selecting_builtin_palette_updates_preview_without_processing(monkeypatc
         assert gui.active_palette_path == str(entry.path)
         assert gui.palette_info_var.get() == "Palette: Built-in: DawnBringer / DB16 (2 colours)"
         assert gui._menu_items["palette"].entrycget("Sort Current Palette", "state") == "normal"
+        assert gui._menu_bar.entrycget("Select", "state") == "normal"
         assert gui.downsample_result is None
         assert gui.palette_result is None
     finally:
@@ -174,5 +186,38 @@ def test_palette_adjustment_sliders_start_neutral_even_when_persisted(monkeypatc
         assert gui.session.current.palette_contrast == 100
         assert gui.session.current.palette_hue == 0
         assert gui.session.current.palette_saturation == 100
+    finally:
+        gui.root.destroy()
+
+
+def test_legacy_outline_adaptive_flag_restores_adaptive_outline_mode(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(
+        monkeypatch,
+        tmp_path,
+        persisted={"outline_adaptive": True},
+    )
+    try:
+        assert gui._outline_adaptive_enabled() is True
+        assert gui.outline_adaptive_darken_percent_var.get() == 60
+        assert gui.outline_add_generated_colours_var.get() is False
+    finally:
+        gui.root.destroy()
+
+
+def test_outline_remove_brightness_threshold_defaults_on_startup(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        assert gui.outline_remove_brightness_threshold_enabled_var.get() is False
+        assert gui.outline_remove_brightness_threshold_percent_var.get() == 40
+        assert gui.outline_remove_brightness_threshold_direction_var.get() == "dark"
+    finally:
+        gui.root.destroy()
+
+
+def test_brush_settings_default_on_startup(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        assert gui.brush_width_var.get() == 1
+        assert gui.brush_shape_var.get() == "square"
     finally:
         gui.root.destroy()
