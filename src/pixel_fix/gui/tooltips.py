@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from .theme import APP_BORDER, APP_SURFACE_BG, APP_TEXT
+
 
 class Tooltip:
     def __init__(self, widget: tk.Widget, text: str):
@@ -35,9 +37,11 @@ class Tooltip:
             window,
             text=self.text,
             justify=tk.LEFT,
-            background="#fff7cc",
+            background=APP_SURFACE_BG,
+            foreground=APP_TEXT,
             relief=tk.SOLID,
             borderwidth=1,
+            highlightbackground=APP_BORDER,
             padx=6,
             pady=4,
         )

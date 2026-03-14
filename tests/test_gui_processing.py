@@ -94,12 +94,18 @@ class WidgetStub:
     def __init__(self) -> None:
         self.state = None
         self.text = None
+        self.style = None
+        self.image = None
 
     def configure(self, **kwargs) -> None:
         if "state" in kwargs:
             self.state = kwargs["state"]
         if "text" in kwargs:
             self.text = kwargs["text"]
+        if "style" in kwargs:
+            self.style = kwargs["style"]
+        if "image" in kwargs:
+            self.image = kwargs["image"]
 
 
 class MenuStub:
@@ -825,6 +831,100 @@ def test_undo_palette_application_restores_previous_preview_state() -> None:
     assert gui._palette_undo_state is None
 
 
+def test_redo_palette_application_reapplies_undone_preview_state() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.downsample_result = downsample_image(_sample_grid(), PipelineConfig(pixel_width=2))
+    gui.palette_result = None
+    gui.transparent_colors = set()
+    gui.downsample_display_image = None
+    gui.palette_display_image = None
+    gui.image_state = "processed_current"
+    gui.last_successful_process_snapshot = {"stage": "downsample"}
+    gui.active_palette = None
+    gui.active_palette_source = ""
+    gui.active_palette_path = None
+    gui.advanced_palette_preview = None
+    gui.session = SimpleNamespace(current=PreviewSettings())
+    gui.quick_compare_active = False
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._update_palette_strip = lambda: None
+    gui._update_image_info = lambda: None
+    gui.redraw_canvas = lambda: None
+    gui._schedule_state_persist = lambda: None
+    gui._refresh_action_states = lambda: None
+    gui._sync_controls_from_settings = lambda _settings: None
+    gui._clear_palette_redo_state = lambda: setattr(gui, "_palette_redo_state", None)
+    gui._palette_undo_state = None
+    gui._palette_redo_state = PaletteUndoState(
+        palette_result=None,
+        downsample_result=None,
+        downsample_display_image=None,
+        palette_display_image=None,
+        image_state="loaded_original",
+        last_successful_process_snapshot=None,
+        active_palette=None,
+        active_palette_source="",
+        active_palette_path=None,
+        advanced_palette_preview=None,
+        transparent_colors=(),
+        settings=PreviewSettings(pixel_width=4),
+        palette_sort_reset_labels=(),
+        palette_sort_reset_source=None,
+        palette_sort_reset_path=None,
+    )
+
+    assert PixelFixGui._redo_palette_application(gui) is True
+    assert gui.downsample_result is None
+    assert gui.process_status_var.value == "Reapplied the last undone image change."
+    assert gui._palette_redo_state is None
+    assert gui._palette_undo_state is not None
+
+
+def test_redo_settings_restores_next_state() -> None:
+    messages: list[tuple[PreviewSettings, PreviewSettings, str | None]] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    previous = PreviewSettings(pixel_width=2)
+    restored = PreviewSettings(pixel_width=6)
+    gui._redo_palette_application = lambda: False
+    gui.process_status_var = SimpleNamespace(set=lambda _value: None)
+    gui.session = SimpleNamespace(
+        current=previous,
+        redo=lambda: restored,
+        history=SimpleNamespace(can_redo=lambda: True),
+    )
+    gui._sync_controls_from_settings = lambda settings: messages.append((settings, settings, None))
+    gui._handle_settings_transition = lambda before, after, message=None: messages.append((before, after, message))
+
+    PixelFixGui.redo(gui)
+
+    assert messages == [
+        (restored, restored, None),
+        (previous, restored, "Settings restored from redo."),
+    ]
+
+
+def test_active_color_picker_uses_processed_preview_and_sets_active_slot() -> None:
+    calls: list[tuple[str, int]] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.original_display_image = object()
+    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui._sample_label_from_preview = lambda _x, _y, *, view: 0x224466 if view == "processed" else None
+    gui._assign_palette_color_to_slot = lambda slot, label: calls.append((slot, label))
+    gui._active_color_slot_value = lambda: app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui._set_canvas_tool_mode = lambda mode: calls.append(("mode", -1 if mode is None else 1))
+    gui._refresh_action_states = lambda: calls.append(("refresh", 0))
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=10, y=12))
+
+    assert calls == [
+        (app_module.ACTIVE_COLOR_SLOT_SECONDARY, 0x224466),
+        ("mode", -1),
+        ("refresh", 0),
+    ]
+
+
 def test_merge_selected_palette_colours_replaces_selection_with_merged_label() -> None:
     captured: dict[str, object] = {}
     gui = PixelFixGui.__new__(PixelFixGui)
@@ -1016,7 +1116,7 @@ def test_palette_reduction_settings_change_does_not_mark_output_stale() -> None:
         PreviewSettings(palette_reduction_colors=24, quantizer="kmeans"),
     )
 
-    assert messages == ["Palette reduction settings changed. Click Generate Reduced Palette to rebuild the palette.", "persist", "refresh"]
+    assert messages == ["Palette reduction settings changed. Click Reduce Palette to rebuild the palette.", "persist", "refresh"]
 
 
 def test_downsample_setting_change_marks_downsample_stale_and_clears_cache() -> None:
@@ -1270,6 +1370,17 @@ def test_canvas_leave_clears_live_pick_preview() -> None:
     assert cursor_updates == ["crosshair", ""]
 
 
+def test_canvas_click_without_image_opens_file_dialog() -> None:
+    calls: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.original_display_image = None
+    gui.open_image = lambda: calls.append("open")
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=10, y=12))
+
+    assert calls == ["open"]
+
+
 def test_persist_state_omits_palette_adjustment_values(monkeypatch) -> None:
     captured: dict[str, object] = {}
     gui = PixelFixGui.__new__(PixelFixGui)
@@ -1299,6 +1410,10 @@ def test_persist_state_omits_palette_adjustment_values(monkeypatch) -> None:
     gui.brush_width_var = SimpleNamespace(get=lambda: 7)
     gui.brush_shape_var = SimpleNamespace(get=lambda: app_module.BRUSH_SHAPE_ROUND)
     gui.view_var = SimpleNamespace(get=lambda: "processed")
+    gui.primary_color_label = 0x112233
+    gui.secondary_color_label = 0x445566
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
     gui.recent_files = ["example.png"]
 
     monkeypatch.setattr(app_module, "save_app_state", lambda data: captured.update(data))
@@ -1319,6 +1434,10 @@ def test_persist_state_omits_palette_adjustment_values(monkeypatch) -> None:
     assert captured["outline_remove_brightness_threshold_percent"] == 45
     assert captured["outline_remove_brightness_threshold_direction"] == app_module.OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT
     assert captured["brush_width"] == 7
+    assert captured["primary_color_label"] == 0x112233
+    assert captured["secondary_color_label"] == 0x445566
+    assert captured["transparent_color_slot"] == app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    assert captured["active_color_slot"] == app_module.ACTIVE_COLOR_SLOT_PRIMARY
     assert captured["brush_shape"] == app_module.BRUSH_SHAPE_ROUND
 
 
@@ -1387,6 +1506,66 @@ def test_palette_canvas_shift_click_selects_range() -> None:
     assert gui._palette_selection_indices == {1, 2, 3}
     assert gui._palette_selection_anchor_index == 1
     assert updates == ["palette", "refresh"]
+
+
+def test_palette_canvas_plain_click_assigns_primary_colour() -> None:
+    updates: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._displayed_palette = [0x111111, 0x222222]
+    gui._palette_hit_regions = [(0, 0, 9, 9), (10, 0, 19, 9)]
+    gui._palette_selection_indices = set()
+    gui._palette_selection_anchor_index = None
+    gui.primary_color_label = 0xFFFFFF
+    gui.secondary_color_label = 0xFFFFFF
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+    gui._update_palette_strip = lambda: updates.append("palette")
+    gui._refresh_action_states = lambda: updates.append("refresh")
+
+    PixelFixGui._on_palette_canvas_click(gui, SimpleNamespace(x=15, y=5, state=0))
+
+    assert gui._palette_selection_indices == {1}
+    assert gui._palette_selection_anchor_index == 1
+    assert gui.primary_color_label == 0x222222
+    assert updates == ["refresh", "palette"]
+
+
+def test_palette_canvas_right_click_assigns_secondary_without_clearing_selection() -> None:
+    updates: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._displayed_palette = [0x111111, 0x222222]
+    gui._palette_hit_regions = [(0, 0, 9, 9), (10, 0, 19, 9)]
+    gui._palette_selection_indices = {0}
+    gui._palette_selection_anchor_index = 0
+    gui.primary_color_label = 0xFFFFFF
+    gui.secondary_color_label = 0xFFFFFF
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+    gui._refresh_action_states = lambda: updates.append("refresh")
+
+    PixelFixGui._on_palette_canvas_right_click(gui, SimpleNamespace(x=15, y=5))
+
+    assert gui._palette_selection_indices == {0}
+    assert gui._palette_selection_anchor_index == 0
+    assert gui.secondary_color_label == 0x222222
+    assert updates == ["refresh"]
+
+
+def test_invert_palette_selection_reverses_selected_and_unselected_swatches() -> None:
+    messages: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._displayed_palette = [0x111111, 0x222222, 0x333333, 0x444444]
+    gui._palette_selection_indices = {1, 3}
+    gui._palette_selection_anchor_index = 1
+    gui.process_status_var = SimpleNamespace(set=lambda value: messages.append(value))
+    gui._update_palette_strip = lambda: messages.append("palette")
+    gui._refresh_action_states = lambda: messages.append("refresh")
+
+    PixelFixGui._invert_palette_selection(gui)
+
+    assert gui._palette_selection_indices == {0, 2}
+    assert gui._palette_selection_anchor_index == 0
+    assert messages == ["palette", "refresh", "Inverted palette selection. 2 palette colours selected."]
 
 
 def test_palette_canvas_ctrl_click_toggles_single_swatch_on_release() -> None:
@@ -1667,8 +1846,7 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
     gui.add_outline_button = WidgetStub()
     gui.remove_outline_button = WidgetStub()
     gui.brush_width_spinbox = WidgetStub()
-    gui.brush_shape_square_button = WidgetStub()
-    gui.brush_shape_round_button = WidgetStub()
+    gui.brush_shape_dropdown_button = WidgetStub()
     gui.outline_palette_mode_button = WidgetStub()
     gui.outline_adaptive_mode_button = WidgetStub()
     gui.outline_adaptive_darken_spinbox = WidgetStub()
@@ -1714,6 +1892,7 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
     assert gui.merge_palette_button.state == app_module.tk.DISABLED
     assert gui.ramp_palette_button.state == app_module.tk.NORMAL
     assert gui.brush_width_spinbox.state == "normal"
+    assert gui.brush_shape_dropdown_button.state == app_module.tk.NORMAL
     assert gui.outline_adaptive_darken_spinbox.state == "disabled"
     assert gui.outline_remove_brightness_threshold_toggle.state == app_module.tk.NORMAL
     assert gui.outline_remove_brightness_threshold_spinbox.state == "disabled"
@@ -1801,8 +1980,7 @@ def test_refresh_action_states_enables_outline_without_selection_in_adaptive_mod
     gui.add_outline_button = WidgetStub()
     gui.remove_outline_button = WidgetStub()
     gui.brush_width_spinbox = WidgetStub()
-    gui.brush_shape_square_button = WidgetStub()
-    gui.brush_shape_round_button = WidgetStub()
+    gui.brush_shape_dropdown_button = WidgetStub()
     gui.outline_palette_mode_button = WidgetStub()
     gui.outline_adaptive_mode_button = WidgetStub()
     gui.outline_adaptive_darken_spinbox = WidgetStub()
@@ -1842,8 +2020,9 @@ def test_refresh_action_states_enables_outline_without_selection_in_adaptive_mod
     PixelFixGui._refresh_action_states(gui)
 
     assert gui.add_outline_button.state == app_module.tk.NORMAL
-    assert gui.pencil_button.state == app_module.tk.DISABLED
+    assert gui.pencil_button.state == app_module.tk.NORMAL
     assert gui.eraser_button.state == app_module.tk.NORMAL
+    assert gui.brush_shape_dropdown_button.state == app_module.tk.NORMAL
     assert gui.outline_adaptive_darken_spinbox.state == "normal"
     assert gui.outline_remove_brightness_threshold_spinbox.state == "disabled"
 
@@ -1907,6 +2086,196 @@ def test_refresh_action_states_enables_remove_threshold_controls_when_enabled() 
     assert gui.outline_remove_brightness_threshold_spinbox.state == "normal"
     assert gui.outline_remove_brightness_direction_dark_button.state == "normal"
     assert gui.outline_remove_brightness_direction_bright_button.state == "normal"
+
+
+def test_refresh_tool_button_styles_marks_active_tool_and_view() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.view_var = SimpleNamespace(get=lambda: "processed")
+    gui.pencil_button = WidgetStub()
+    gui.eraser_button = WidgetStub()
+    gui.palette_picker_button = WidgetStub()
+    gui.view_original_button = WidgetStub()
+    gui.view_processed_button = WidgetStub()
+
+    PixelFixGui._refresh_tool_button_styles(gui)
+
+    assert gui.pencil_button.style == "ToolButton.TButton"
+    assert gui.eraser_button.style == "ToolButton.TButton"
+    assert gui.palette_picker_button.style == "ToolButtonActive.TButton"
+    assert gui.view_original_button.style == "ToolButton.TButton"
+    assert gui.view_processed_button.style == "ToolButtonActive.TButton"
+
+
+def test_initial_active_color_state_defaults_to_white_primary_and_transparent_secondary() -> None:
+    assert PixelFixGui._initial_active_color_state({}) == (
+        0xFFFFFF,
+        0xFFFFFF,
+        app_module.ACTIVE_COLOR_SLOT_SECONDARY,
+        app_module.ACTIVE_COLOR_SLOT_PRIMARY,
+    )
+
+
+def test_build_active_color_preview_image_renders_front_active_and_back_secondary() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._active_color_preview_templates = {}
+    gui.primary_color_label = 0x123456
+    gui.secondary_color_label = 0xABCDEF
+    gui.transparent_color_slot = None
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+
+    image = PixelFixGui._build_active_color_preview_image(gui)
+
+    assert image.getpixel((27, 27)) == (0x12, 0x34, 0x56, 255)
+    assert image.getpixel((2, 2)) == (0xAB, 0xCD, 0xEF, 255)
+
+
+def test_update_palette_adjustment_labels_use_percent_suffixes() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.palette_brightness_var = SimpleNamespace(get=lambda: 15)
+    gui.palette_contrast_var = SimpleNamespace(get=lambda: -20)
+    gui.palette_hue_var = SimpleNamespace(get=lambda: 30)
+    gui.palette_saturation_var = SimpleNamespace(get=lambda: 40)
+    gui.palette_brightness_value_var = SimpleNamespace(value="", set=lambda value: setattr(gui.palette_brightness_value_var, "value", value))
+    gui.palette_contrast_value_var = SimpleNamespace(value="", set=lambda value: setattr(gui.palette_contrast_value_var, "value", value))
+    gui.palette_hue_value_var = SimpleNamespace(value="", set=lambda value: setattr(gui.palette_hue_value_var, "value", value))
+    gui.palette_saturation_value_var = SimpleNamespace(value="", set=lambda value: setattr(gui.palette_saturation_value_var, "value", value))
+
+    PixelFixGui._update_palette_adjustment_labels(gui)
+
+    assert gui.palette_brightness_value_var.value == "15%"
+    assert gui.palette_contrast_value_var.value == "-20%"
+    assert gui.palette_hue_value_var.value == "30%"
+    assert gui.palette_saturation_value_var.value == "40%"
+
+
+def test_update_image_info_includes_current_colour_count() -> None:
+    info = SimpleNamespace(value="", set=lambda value: setattr(info, "value", value))
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.source_path = Path("sprite.png")
+    gui.zoom = 300
+    gui.image_info_var = info
+    gui.original_display_image = None
+    gui.palette_result = _result_from_labels([[0x112233, 0x445566], [0x112233, 0x112233]])
+    gui.downsample_result = None
+
+    PixelFixGui._update_image_info(gui)
+
+    assert info.value == "sprite.png  2x2  2 colours  300%"
+
+
+def test_update_palette_strip_updates_palette_frame_title_with_count() -> None:
+    rectangles: list[tuple[object, ...]] = []
+    palette_info = SimpleNamespace(value="", set=lambda value: setattr(palette_info, "value", value))
+
+    class PaletteCanvasStub:
+        def delete(self, *_args):
+            rectangles.clear()
+
+        def configure(self, **_kwargs):
+            return None
+
+        def winfo_width(self):
+            return 240
+
+        def create_rectangle(self, *args, **_kwargs):
+            rectangles.append(args)
+
+    palette_frame = WidgetStub()
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.palette_canvas = PaletteCanvasStub()
+    gui.palette_frame = palette_frame
+    gui.palette_info_var = palette_info
+    gui.active_palette = [0x112233, 0x445566, 0x778899]
+    gui.active_palette_source = "Edited Palette"
+    gui._palette_selection_indices = set()
+    gui.advanced_palette_preview = None
+    gui._current_output_result = lambda: None
+
+    PixelFixGui._update_palette_strip(gui)
+
+    assert palette_frame.text == "PALETTE (3)"
+    assert palette_info.value == "Palette: Edited Palette (3 colours)"
+
+
+def test_build_active_color_preview_image_moves_active_slot_to_front() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._active_color_preview_templates = {}
+    gui.primary_color_label = 0x123456
+    gui.secondary_color_label = 0xABCDEF
+    gui.transparent_color_slot = None
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+
+    image = PixelFixGui._build_active_color_preview_image(gui)
+
+    assert image.getpixel((27, 27)) == (0xAB, 0xCD, 0xEF, 255)
+    assert image.getpixel((2, 2)) == (0x12, 0x34, 0x56, 255)
+
+
+def test_active_color_preview_click_selects_back_slot() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.primary_color_label = 0xFFFFFF
+    gui.secondary_color_label = 0x000000
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+    gui._refresh_active_color_preview = lambda: None
+    gui._schedule_state_persist_if_ready = lambda: None
+
+    PixelFixGui._on_active_color_preview_click(gui, SimpleNamespace(x=4, y=4))
+
+    assert gui.active_color_slot == app_module.ACTIVE_COLOR_SLOT_SECONDARY
+
+
+def test_swap_active_colors_exchanges_labels_and_transparency_slot() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.primary_color_label = 0x112233
+    gui.secondary_color_label = 0x445566
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+    gui._refresh_active_color_preview = lambda: None
+    gui._schedule_state_persist_if_ready = lambda: None
+    gui._refresh_action_states = lambda: None
+
+    PixelFixGui._swap_active_colors(gui)
+
+    assert gui.primary_color_label == 0x445566
+    assert gui.secondary_color_label == 0x112233
+    assert gui.transparent_color_slot == app_module.ACTIVE_COLOR_SLOT_PRIMARY
+
+
+def test_make_active_color_transparent_targets_active_slot() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.primary_color_label = 0x112233
+    gui.secondary_color_label = 0x445566
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.active_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+    gui._refresh_active_color_preview = lambda: None
+    gui._schedule_state_persist_if_ready = lambda: None
+    gui._refresh_action_states = lambda: None
+
+    PixelFixGui._make_active_color_transparent(gui)
+
+    assert gui.transparent_color_slot == app_module.ACTIVE_COLOR_SLOT_PRIMARY
+
+
+def test_selected_palette_brush_label_uses_primary_active_colour() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.primary_color_label = 0x224466
+    gui.secondary_color_label = 0x88AACC
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+
+    assert PixelFixGui._selected_palette_brush_label(gui) == 0x224466
+
+
+def test_selected_palette_brush_label_returns_none_when_primary_is_transparent() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.primary_color_label = 0x224466
+    gui.secondary_color_label = 0x88AACC
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+
+    assert PixelFixGui._selected_palette_brush_label(gui) is None
 
 
 def test_add_transparent_region_updates_output_and_undo_restores() -> None:
@@ -2391,8 +2760,50 @@ def test_update_palette_strip_flattens_generated_ramps_into_normal_palette() -> 
 
     PixelFixGui._update_palette_strip(gui)
 
-    assert len(rectangles) == gui.advanced_palette_preview.palette_size()
+    assert len(rectangles) == gui.advanced_palette_preview.palette_size() * 2
     assert palette_info.value == f"Palette: Generated ({gui.advanced_palette_preview.palette_size()} colours)"
+
+
+def test_update_palette_strip_uses_builtin_preview_without_mutating_selection() -> None:
+    rectangles: list[tuple[object, ...]] = []
+    palette_info = SimpleNamespace(value="", set=lambda value: setattr(palette_info, "value", value))
+
+    class PaletteCanvasStub:
+        def delete(self, *_args):
+            rectangles.clear()
+
+        def configure(self, **_kwargs):
+            return None
+
+        def winfo_width(self):
+            return 240
+
+        def create_rectangle(self, *args, **_kwargs):
+            rectangles.append(args)
+
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.palette_canvas = PaletteCanvasStub()
+    gui.palette_info_var = palette_info
+    gui.active_palette = [0x112233, 0x445566, 0x778899]
+    gui.active_palette_source = "Edited Palette"
+    gui._palette_selection_indices = {2}
+    gui._palette_selection_anchor_index = 2
+    gui._builtin_palette_preview_entry = app_module.PaletteCatalogEntry(
+        label="Preview",
+        path=Path("preview.gpl"),
+        colors=(0x111111, 0x222222),
+        menu_path=("Built-in",),
+        source_label="Built-in / Preview",
+    )
+    gui.advanced_palette_preview = None
+    gui._current_output_result = lambda: None
+
+    PixelFixGui._update_palette_strip(gui)
+
+    assert len(rectangles) == 4
+    assert gui._palette_selection_indices == {2}
+    assert gui._palette_selection_anchor_index == 2
+    assert palette_info.value == "Palette: Preview: Built-in / Preview (2 colours)"
 
 
 def test_get_display_palette_uses_adjusted_palette_preview() -> None:
