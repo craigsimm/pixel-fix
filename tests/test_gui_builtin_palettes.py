@@ -218,6 +218,6 @@ def test_brush_settings_default_on_startup(monkeypatch, tmp_path: Path) -> None:
     gui = _build_gui(monkeypatch, tmp_path)
     try:
         assert gui.brush_width_var.get() == 1
-        assert gui.brush_shape_var.get() == "square"
+        assert gui.brush_shape_var.get() == "Square"
     finally:
         gui.root.destroy()

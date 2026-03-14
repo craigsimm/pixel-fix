@@ -25,8 +25,13 @@ class PreviewSettings:
 class UndoHistory:
     def __init__(self) -> None:
         self._undo: list[PreviewSettings] = []
+        self._redo: list[PreviewSettings] = []
 
     def push(self, settings: PreviewSettings) -> None:
+        self._undo.append(settings)
+        self._redo.clear()
+
+    def push_undo(self, settings: PreviewSettings) -> None:
         self._undo.append(settings)
 
     def pop(self) -> PreviewSettings | None:
@@ -36,6 +41,20 @@ class UndoHistory:
 
     def can_undo(self) -> bool:
         return bool(self._undo)
+
+    def push_redo(self, settings: PreviewSettings) -> None:
+        self._redo.append(settings)
+
+    def pop_redo(self) -> PreviewSettings | None:
+        if not self._redo:
+            return None
+        return self._redo.pop()
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def clear_redo(self) -> None:
+        self._redo.clear()
 
 
 class SettingsSession:
@@ -53,5 +72,13 @@ class SettingsSession:
     def undo(self) -> PreviewSettings:
         previous = self.history.pop()
         if previous is not None:
+            self.history.push_redo(self.current)
             self.current = previous
+        return self.current
+
+    def redo(self) -> PreviewSettings:
+        next_value = self.history.pop_redo()
+        if next_value is not None:
+            self.history.push_undo(self.current)
+            self.current = next_value
         return self.current

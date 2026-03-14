@@ -1,0 +1,38 @@
+GIMP Palette
+#Palette Name: Mega Drive Blue
+#Description: A palette built and developed from the very title screen of Sonic 3, focused on emulating vibrant colors and an abundant use of black found in Mega Drive/Genesis games that somehow contrast with the SNES's more pastel tones. Note that this palette is in constant development, so expect an update somewhere in the future. (Note: this is not specifically a system palette, only inspired by it)
+#Colors: 34
+43	18	13	2b120d
+159	18	17	9f1211
+252	20	0	fc1400
+252	106	0	fc6a00
+252	252	0	fcfc00
+0	0	0	000000
+51	4	69	330445
+156	12	156	9c0c9c
+255	9	157	ff099d
+0	7	44	00072c
+4	0	133	040085
+0	0	255	0000ff
+0	102	255	0066ff
+103	205	252	67cdfc
+0	72	73	004849
+6	120	38	067826
+0	201	8	00c908
+82	255	0	52ff00
+198	240	34	c6f022
+53	44	46	352c2e
+117	73	68	754944
+173	89	80	ad5950
+246	117	122	f6757a
+250	197	155	fac59b
+105	54	35	693623
+176	87	43	b0572b
+233	142	66	e98e42
+252	180	72	fcb448
+255	252	255	fffcff
+102	102	136	666688
+152	146	173	9892ad
+184	184	209	b8b8d1
+221	217	230	ddd9e6
+252	252	252	fcfcfc
