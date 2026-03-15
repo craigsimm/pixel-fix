@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from PIL import Image, ImageDraw, ImageTk
 
 from pixel_fix.palette.io import load_palette, save_palette
-from pixel_fix.palette.adjust import PaletteAdjustments, adjust_structured_palette
+from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels, adjust_structured_palette
 from pixel_fix.palette.advanced import structured_palette_from_override
 from pixel_fix.palette.catalog import PaletteCatalogEntry, discover_palette_catalog
 from pixel_fix.palette.color_modes import extract_unique_colors
@@ -68,6 +68,7 @@ from .processing import (
     apply_eraser_operation,
     apply_eraser_operations,
     apply_ellipse_operation,
+    apply_line_operation,
     apply_pencil_operation,
     apply_pencil_operations,
     apply_rectangle_operation,
@@ -103,13 +104,29 @@ from .zoom import ZOOM_PRESETS, choose_fit_zoom, clamp_zoom, zoom_in, zoom_out
 
 OPEN_HAND_CURSOR = "hand2"
 CLOSED_HAND_CURSOR = "fleur"
-MAX_PALETTE_SWATCHES = 256
+MAX_PALETTE_SWATCHES = 1024
 PALETTE_SWATCH_SIZE = 18
+PALETTE_SWATCH_COLOUR_SIZE = 16
 PALETTE_SWATCH_GAP = 0
+PALETTE_COLUMN_CONTENT_PADDING = 6
+PALETTE_ACTION_GAP = 3
+PALETTE_ACTION_ICON_BUTTON_SIZE = 26
+PALETTE_ACTION_ICON_OFFSET = (-2, -2)
+PALETTE_BROWSER_WIDTH = 320
+PALETTE_BROWSER_HEIGHT = 360
+PALETTE_BROWSER_MARGIN = 12
+PALETTE_BROWSER_GAP = 8
+PALETTE_BROWSER_SWATCH_STRIP_COUNT = 8
+PALETTE_BROWSER_SWATCH_STRIP_SIZE = 8
 SECTION_CONTENT_PADDING = 8
 TOOL_BUTTON_PADDING = (0, 0)
 TOOL_BUTTON_WIDTH = 40
 TOOL_BUTTON_HEIGHT = 40
+TOOLS_SIDEBAR_WIDTH = 252
+TOOLS_SIDEBAR_WRAP_LENGTH = 220
+PALETTE_COLUMN_DEFAULT_WIDTH = 184
+PALETTE_COLUMN_MIN_WIDTH = 172
+PALETTE_COLUMN_WIDTH_RATIO = 0.115
 ACTIVE_COLOR_SLOT_PRIMARY = "primary"
 ACTIVE_COLOR_SLOT_SECONDARY = "secondary"
 ACTIVE_COLOR_DEFAULT_LABEL = 0xFFFFFF
@@ -120,7 +137,7 @@ ACTIVE_COLOR_PREVIEW_PLACEHOLDER_BACK = (0, 255, 255, 255)
 ACTIVE_COLOR_PREVIEW_TEMPLATE_NONE = "current_no_transparent.png"
 ACTIVE_COLOR_PREVIEW_TEMPLATE_FRONT_TRANSPARENT = "current_transparent_primary.png"
 ACTIVE_COLOR_PREVIEW_TEMPLATE_BACK_TRANSPARENT = "current_transparent_secondary.png"
-PALETTE_DROPDOWN_POST_X_OFFSET = 164
+DEFAULT_PALETTE_RESOURCE = "palettes/default.gpl"
 MAX_RECENT_FILES = 10
 MAX_KEY_COLORS = 24
 SELECTION_THRESHOLD_OPTIONS = tuple(range(10, 101, 10))
@@ -169,6 +186,10 @@ COLOR_MODE_VALUE_TO_DISPLAY = {value: label for (label, value) in COLOR_MODE_OPT
 OUTLINE_COLOUR_MODE_PALETTE = "palette"
 OUTLINE_COLOUR_MODE_ADAPTIVE = "adaptive"
 OUTLINE_ADAPTIVE_DARKEN_DEFAULT = 60
+OUTLINE_COLOUR_MODE_LABELS = {
+    OUTLINE_COLOUR_MODE_PALETTE: "Selected",
+    OUTLINE_COLOUR_MODE_ADAPTIVE: "Adaptive",
+}
 CANVAS_TOOL_MODE_PALETTE_PICK = "palette-pick"
 CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK = "active-color-pick"
 CANVAS_TOOL_MODE_TRANSPARENCY_PICK = "transparency-pick"
@@ -177,6 +198,29 @@ CANVAS_TOOL_MODE_PENCIL = "pencil"
 CANVAS_TOOL_MODE_ERASER = "eraser"
 CANVAS_TOOL_MODE_ELLIPSE = "ellipse"
 CANVAS_TOOL_MODE_RECTANGLE = "rectangle"
+CANVAS_TOOL_MODE_LINE = "line"
+CANVAS_TOOL_MODE_GRADIENT = "gradient"
+CANVAS_TOOL_MODE_ADD_OUTLINE = "add-outline"
+CANVAS_TOOL_MODE_REMOVE_OUTLINE = "remove-outline"
+MOUSE_BUTTON_ACTION_VIEW_ORIGINAL = "view-original"
+MOUSE_BUTTON_ACTION_SAMPLE_COLOR = "sample-color"
+MOUSE_BUTTON_ACTION_SWAP_COLORS = "swap-colors"
+MOUSE_BUTTON_ACTION_ERASER = "eraser"
+MOUSE_BUTTON_ACTION_OPTIONS = (
+    ("View Original", MOUSE_BUTTON_ACTION_VIEW_ORIGINAL),
+    ("Sample Color", MOUSE_BUTTON_ACTION_SAMPLE_COLOR),
+    ("Swap Colors", MOUSE_BUTTON_ACTION_SWAP_COLORS),
+    ("Eraser", MOUSE_BUTTON_ACTION_ERASER),
+)
+MOUSE_BUTTON_ACTION_VALUES = {value for _, value in MOUSE_BUTTON_ACTION_OPTIONS}
+MOUSE_BUTTON_DEFAULT_RIGHT_ACTION = MOUSE_BUTTON_ACTION_VIEW_ORIGINAL
+MOUSE_BUTTON_DEFAULT_MIDDLE_ACTION = MOUSE_BUTTON_ACTION_SAMPLE_COLOR
+CANVAS_MOUSE_BUTTON_MIDDLE = 2
+CANVAS_MOUSE_BUTTON_RIGHT = 3
+OUTLINE_REMOVE_DIRECTION_LABELS = {
+    OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK: "Dark",
+    OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT: "Bright",
+}
 EVENT_STATE_SHIFT_MASK = 0x0001
 
 
@@ -206,6 +250,12 @@ class PaletteUndoState:
     palette_sort_reset_labels: tuple[int, ...] = ()
     palette_sort_reset_source: str | None = None
     palette_sort_reset_path: str | None = None
+
+
+@dataclass
+class CanvasMouseActionState:
+    button: int
+    action: str
 
 
 class PixelFixGui:
@@ -256,6 +306,7 @@ class PixelFixGui:
         self._shape_preview_current: tuple[int, int] | None = None
         self._shape_preview_tool_mode: str | None = None
         self._shape_preview_constrained = False
+        self._mouse_button_action_state: CanvasMouseActionState | None = None
         self._palette_selection_indices: set[int] = set()
         self._palette_selection_anchor_index: int | None = None
         self._palette_ctrl_drag_active = False
@@ -271,8 +322,6 @@ class PixelFixGui:
         self._palette_sort_reset_path: str | None = None
         self.builtin_palette_entries = discover_palette_catalog(self._resource_path("palettes"))
         self._builtin_palette_by_path = {str(entry.path): entry for entry in self.builtin_palette_entries}
-        self._builtin_palette_menu_entries: dict[tuple[tk.Menu, int], PaletteCatalogEntry] = {}
-        self._builtin_palette_menus: list[tk.Menu] = []
         self._builtin_palette_preview_entry: PaletteCatalogEntry | None = None
         self.last_output_path = persisted.get("last_output_path")
         self.last_successful_process_snapshot = persisted.get("last_successful_process_snapshot")
@@ -292,8 +341,18 @@ class PixelFixGui:
         self._tool_button_assets: dict[str, str] = {}
         self._tool_button_enabled: dict[str, bool] = {}
         self._tool_button_frames: dict[str, tk.Frame] = {}
+        self._palette_action_button_icons: dict[tuple[str, bool], ImageTk.PhotoImage] = {}
+        self._palette_action_button_assets: dict[str, str] = {}
+        self._palette_action_button_enabled: dict[str, bool] = {}
         self._active_color_preview_templates: dict[str, Image.Image] = {}
         self._active_color_preview_image_ref: ImageTk.PhotoImage | None = None
+        self._pick_preview_sample: tuple[int, int, int] | None = None
+        self._palette_browser_window: tk.Toplevel | None = None
+        self._palette_browser_search_var = tk.StringVar(value="")
+        self._palette_browser_displayed_entries: list[PaletteCatalogEntry] = []
+        self._palette_browser_root_bind_ids: dict[str, str] = {}
+        self._palette_browser_empty_label: tk.Widget | None = None
+        self._palette_browser_search_trace_id: str | None = None
         self._tooltips: list[Tooltip] = []
         self._persist_after_id: str | None = None
         self._suspend_control_events = False
@@ -325,8 +384,23 @@ class PixelFixGui:
         self.quantizer_var = tk.StringVar()
         self.dither_var = tk.StringVar()
         self.checkerboard_var = tk.BooleanVar(value=bool(persisted.get("checkerboard", False)))
+        self.right_mouse_action_var = tk.StringVar(
+            value=self._coerce_mouse_button_action(
+                persisted.get("right_mouse_action"),
+                default=MOUSE_BUTTON_DEFAULT_RIGHT_ACTION,
+            )
+        )
+        self.middle_mouse_action_var = tk.StringVar(
+            value=self._coerce_mouse_button_action(
+                persisted.get("middle_mouse_action"),
+                default=MOUSE_BUTTON_DEFAULT_MIDDLE_ACTION,
+            )
+        )
         self.outline_pixel_perfect_var = tk.BooleanVar(value=bool(persisted.get("outline_pixel_perfect", True)))
         self.outline_colour_mode_var = tk.StringVar(value=self._initial_outline_colour_mode(persisted))
+        self.outline_colour_mode_display_var = tk.StringVar(
+            value=OUTLINE_COLOUR_MODE_LABELS[self._initial_outline_colour_mode(persisted)]
+        )
         self.outline_adaptive_darken_percent_var = tk.IntVar(
             value=self._coerce_outline_adaptive_darken_percent(persisted.get("outline_adaptive_darken_percent", OUTLINE_ADAPTIVE_DARKEN_DEFAULT))
         )
@@ -344,6 +418,13 @@ class PixelFixGui:
                 persisted.get("outline_remove_brightness_threshold_direction", OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK)
             )
         )
+        self.outline_remove_brightness_direction_display_var = tk.StringVar(
+            value=OUTLINE_REMOVE_DIRECTION_LABELS[
+                self._coerce_outline_remove_brightness_direction(
+                    persisted.get("outline_remove_brightness_threshold_direction", OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK)
+                )
+            ]
+        )
         self.brush_width_var = tk.IntVar(value=self._coerce_brush_width(persisted.get("brush_width", BRUSH_WIDTH_DEFAULT)))
         self.brush_shape_var = tk.StringVar(value=self._coerce_brush_shape(persisted.get("brush_shape", BRUSH_SHAPE_SQUARE)).title())
         self.process_status_var = tk.StringVar(value="Open a PNG image to begin.")
@@ -351,6 +432,9 @@ class PixelFixGui:
         self.palette_info_var = tk.StringVar(value="Palette: none")
         self.image_info_var = tk.StringVar(value="No image  -  100%")
         self.pick_preview_var = tk.StringVar(value="")
+        self.pick_preview_rgb_var = tk.StringVar(value="")
+        self.pick_preview_position_var = tk.StringVar(value="")
+        self.options_helper_var = tk.StringVar(value="Select a tool to see its options.")
         self.palette_brightness_value_var = tk.StringVar(value="0%")
         self.palette_contrast_value_var = tk.StringVar(value="0%")
         self.palette_hue_value_var = tk.StringVar(value="0%")
@@ -360,6 +444,8 @@ class PixelFixGui:
         self._menu_items: dict[str, tk.Menu] = {}
         self._build_menu_bar()
         self._build_layout()
+        if not self._restore_active_palette(persisted):
+            self._load_default_palette()
         self._sync_controls_from_settings(self.session.current)
         self._update_scale_info()
         self._update_palette_strip()
@@ -460,6 +546,66 @@ class PixelFixGui:
             darkcolor=[("pressed", APP_ACCENT), ("active", APP_BORDER), ("disabled", APP_BORDER)],
             lightcolor=[("pressed", APP_ACCENT), ("active", APP_BORDER), ("disabled", APP_BORDER)],
             arrowcolor=[("pressed", APP_BG), ("disabled", APP_MUTED_TEXT)],
+        )
+        style.configure("Compact.TButton", padding=(4, 2))
+        style.configure("Compact.TMenubutton", padding=(4, 2))
+        style.configure(
+            "TEntry",
+            fieldbackground=APP_SURFACE_BG,
+            foreground=APP_TEXT,
+            insertcolor=APP_TEXT,
+            bordercolor=APP_BORDER,
+            darkcolor=APP_BORDER,
+            lightcolor=APP_BORDER,
+            padding=(6, 4),
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("disabled", APP_BG), ("readonly", APP_SURFACE_BG)],
+            foreground=[("disabled", APP_MUTED_TEXT)],
+            bordercolor=[("disabled", APP_BORDER), ("focus", APP_BORDER)],
+            darkcolor=[("disabled", APP_BORDER), ("focus", APP_BORDER)],
+            lightcolor=[("disabled", APP_BORDER), ("focus", APP_BORDER)],
+        )
+        style.configure("Compact.TEntry", padding=(4, 2))
+        style.configure("Compact.TSpinbox", arrowsize=9, padding=(3, 1))
+        style.configure(
+            "PaletteActionIcon.TButton",
+            background=APP_SURFACE_BG,
+            foreground=APP_TEXT,
+            bordercolor=APP_BORDER,
+            borderwidth=1,
+            darkcolor=APP_BORDER,
+            lightcolor=APP_BORDER,
+            padding=(0, 0),
+            relief=tk.FLAT,
+        )
+        style.map(
+            "PaletteActionIcon.TButton",
+            background=[("pressed", APP_ACCENT), ("active", APP_HOVER_BG), ("disabled", APP_BG)],
+            foreground=[("pressed", APP_BG), ("disabled", APP_MUTED_TEXT)],
+            bordercolor=[("pressed", APP_ACCENT), ("active", APP_BORDER), ("disabled", APP_BORDER)],
+            darkcolor=[("pressed", APP_ACCENT), ("active", APP_BORDER), ("disabled", APP_BORDER)],
+            lightcolor=[("pressed", APP_ACCENT), ("active", APP_BORDER), ("disabled", APP_BORDER)],
+        )
+        style.configure(
+            "PaletteActionIconDisabled.TButton",
+            background=APP_SURFACE_BG,
+            foreground=APP_MUTED_TEXT,
+            bordercolor=APP_BORDER,
+            borderwidth=1,
+            darkcolor=APP_BORDER,
+            lightcolor=APP_BORDER,
+            padding=(0, 0),
+            relief=tk.FLAT,
+        )
+        style.map(
+            "PaletteActionIconDisabled.TButton",
+            background=[("pressed", APP_SURFACE_BG), ("active", APP_SURFACE_BG), ("disabled", APP_SURFACE_BG)],
+            foreground=[("pressed", APP_MUTED_TEXT), ("active", APP_MUTED_TEXT), ("disabled", APP_MUTED_TEXT)],
+            bordercolor=[("pressed", APP_BORDER), ("active", APP_BORDER), ("disabled", APP_BORDER)],
+            darkcolor=[("pressed", APP_BORDER), ("active", APP_BORDER), ("disabled", APP_BORDER)],
+            lightcolor=[("pressed", APP_BORDER), ("active", APP_BORDER), ("disabled", APP_BORDER)],
         )
         style.configure(
             "ToolButton.TButton",
@@ -736,6 +882,24 @@ class PixelFixGui:
                 variable=self.selection_threshold_var,
                 command=self._on_selection_threshold_changed,
             )
+        mouse_buttons_menu = self._new_menu(preferences_menu)
+        right_mouse_menu = self._new_menu(mouse_buttons_menu)
+        middle_mouse_menu = self._new_menu(mouse_buttons_menu)
+        for label, value in MOUSE_BUTTON_ACTION_OPTIONS:
+            right_mouse_menu.add_radiobutton(
+                label=label,
+                value=value,
+                variable=self.right_mouse_action_var,
+                command=lambda action=value: self._select_mouse_button_action(CANVAS_MOUSE_BUTTON_RIGHT, action),
+            )
+            middle_mouse_menu.add_radiobutton(
+                label=label,
+                value=value,
+                variable=self.middle_mouse_action_var,
+                command=lambda action=value: self._select_mouse_button_action(CANVAS_MOUSE_BUTTON_MIDDLE, action),
+            )
+        mouse_buttons_menu.add_cascade(label="Right Mouse Button", menu=right_mouse_menu)
+        mouse_buttons_menu.add_cascade(label="Middle Mouse Button", menu=middle_mouse_menu)
         preferences_menu.add_checkbutton(label="Checkerboard background", variable=self.checkerboard_var, command=self._on_overlay_changed)
         preferences_menu.add_separator()
         preferences_menu.add_cascade(label="Resize Method", menu=resize_menu)
@@ -743,6 +907,7 @@ class PixelFixGui:
         preferences_menu.add_cascade(label="Colour Ramp", menu=colour_ramp_menu)
         preferences_menu.add_cascade(label="Dithering Method", menu=dithering_menu)
         preferences_menu.add_cascade(label="Selection Threshold", menu=selection_threshold_menu)
+        preferences_menu.add_cascade(label="Mouse Buttons", menu=mouse_buttons_menu)
         menubar.add_cascade(label="Preferences", menu=preferences_menu)
 
         self._menu_bar = menubar
@@ -764,6 +929,9 @@ class PixelFixGui:
         self._menu_items["preferences_colour_ramp"] = colour_ramp_menu
         self._menu_items["preferences_dithering"] = dithering_menu
         self._menu_items["preferences_selection_threshold"] = selection_threshold_menu
+        self._menu_items["preferences_mouse_buttons"] = mouse_buttons_menu
+        self._menu_items["preferences_right_mouse_button"] = right_mouse_menu
+        self._menu_items["preferences_middle_mouse_button"] = middle_mouse_menu
         self._populate_builtin_palette_menu()
         self._populate_palette_sort_menu()
         self._refresh_recent_menu()
@@ -772,7 +940,7 @@ class PixelFixGui:
         body = ttk.Frame(self.root)
         body.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        sidebar = ttk.Frame(body, width=360)
+        sidebar = ttk.Frame(body, width=TOOLS_SIDEBAR_WIDTH)
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         sidebar.pack_propagate(False)
 
@@ -783,14 +951,22 @@ class PixelFixGui:
         self.pixel_width_spinbox.pack(side=tk.LEFT)
         self.downsample_button = ttk.Button(row, text="Downsample", command=self.downsample_current_image)
         self.downsample_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(scale_section, textvariable=self.scale_info_var, wraplength=300).pack(anchor=tk.W, pady=(6, 0))
+        ttk.Label(scale_section, textvariable=self.scale_info_var, wraplength=TOOLS_SIDEBAR_WRAP_LENGTH).pack(
+            anchor=tk.W,
+            pady=(6, 0),
+        )
 
-        palette_section = self._create_section(sidebar, "Options")
-        brush_settings_row = ttk.Frame(palette_section)
-        brush_settings_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(brush_settings_row, text="Width").pack(side=tk.LEFT)
+        self.options_section = self._create_section(sidebar, "Options")
+        self.options_helper_label = ttk.Label(
+            self.options_section,
+            textvariable=self.options_helper_var,
+            wraplength=TOOLS_SIDEBAR_WRAP_LENGTH,
+            justify=tk.LEFT,
+        )
+        self.brush_width_row = ttk.Frame(self.options_section)
+        ttk.Label(self.brush_width_row, text="Pixel Width").pack(side=tk.LEFT)
         self.brush_width_spinbox = ttk.Spinbox(
-            brush_settings_row,
+            self.brush_width_row,
             from_=1,
             to=BRUSH_WIDTH_MAX,
             textvariable=self.brush_width_var,
@@ -798,8 +974,10 @@ class PixelFixGui:
             command=self._on_brush_width_changed,
         )
         self.brush_width_spinbox.pack(side=tk.LEFT, padx=(8, 0))
+        self.brush_shape_row = ttk.Frame(self.options_section)
+        ttk.Label(self.brush_shape_row, text="Brush Shape").pack(side=tk.LEFT)
         self.brush_shape_dropdown_button = ttk.Menubutton(
-            brush_settings_row,
+            self.brush_shape_row,
             textvariable=self.brush_shape_var,
         )
         self.brush_shape_dropdown_button.pack(side=tk.LEFT, padx=(10, 0))
@@ -811,40 +989,56 @@ class PixelFixGui:
                 command=lambda value=display_value: self._select_brush_shape(value),
             )
         self.brush_shape_dropdown_button.configure(menu=self.brush_shape_dropdown_menu)
-        outline_row = ttk.Frame(palette_section)
-        outline_row.pack(fill=tk.X, pady=(8, 0))
+        self.pick_preview_empty_label = ttk.Label(
+            self.options_section,
+            text="Hover over the processed preview to inspect a pixel.",
+            wraplength=TOOLS_SIDEBAR_WRAP_LENGTH,
+            justify=tk.LEFT,
+        )
+        self.pick_preview_frame = ttk.Frame(self.options_section)
+        self.pick_preview_swatch = tk.Label(
+            self.pick_preview_frame,
+            width=2,
+            height=1,
+            bg=APP_SURFACE_BG,
+            fg=APP_TEXT,
+            relief=tk.SOLID,
+            bd=1,
+        )
+        self.pick_preview_swatch.pack(side=tk.LEFT)
+        self.pick_preview_hex_label = ttk.Label(self.pick_preview_frame, textvariable=self.pick_preview_var, width=7)
+        self.pick_preview_hex_label.pack(side=tk.LEFT, padx=(4, 0))
+        self.pick_preview_rgb_label = ttk.Label(self.pick_preview_frame, textvariable=self.pick_preview_rgb_var, width=14)
+        self.pick_preview_rgb_label.pack(side=tk.LEFT, padx=(6, 0))
+        self.pick_preview_position_label = ttk.Label(self.pick_preview_frame, textvariable=self.pick_preview_position_var, width=8)
+        self.pick_preview_position_label.pack(side=tk.LEFT, padx=(6, 0))
+        self.outline_pixel_perfect_row = ttk.Frame(self.options_section)
         self.outline_pixel_perfect_toggle = ttk.Checkbutton(
-            outline_row,
+            self.outline_pixel_perfect_row,
             text="Pixel Perfect",
             variable=self.outline_pixel_perfect_var,
             command=self._on_outline_pixel_perfect_changed,
         )
         self.outline_pixel_perfect_toggle.pack(side=tk.LEFT)
-        outline_mode_row = ttk.Frame(palette_section)
-        outline_mode_row.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(outline_mode_row, text="Outline Colour").pack(side=tk.LEFT)
-        self.outline_palette_mode_button = ttk.Radiobutton(
-            outline_mode_row,
-            text="Selected Palette",
-            value=OUTLINE_COLOUR_MODE_PALETTE,
-            variable=self.outline_colour_mode_var,
-            command=self._on_outline_colour_mode_changed,
+        self.outline_colour_mode_row = ttk.Frame(self.options_section)
+        ttk.Label(self.outline_colour_mode_row, text="Outline Colour").pack(side=tk.LEFT)
+        self.outline_colour_mode_dropdown_button = ttk.Menubutton(
+            self.outline_colour_mode_row,
+            textvariable=self.outline_colour_mode_display_var,
         )
-        self.outline_palette_mode_button.pack(side=tk.LEFT, padx=(10, 0))
-        self.outline_adaptive_mode_button = ttk.Radiobutton(
-            outline_mode_row,
-            text="Adaptive",
-            value=OUTLINE_COLOUR_MODE_ADAPTIVE,
-            variable=self.outline_colour_mode_var,
-            command=self._on_outline_colour_mode_changed,
-        )
-        self.outline_adaptive_mode_button.pack(side=tk.LEFT, padx=(10, 0))
-        outline_adaptive_row = ttk.Frame(palette_section)
-        outline_adaptive_row.pack(fill=tk.X, pady=(6, 0))
-        self.outline_adaptive_darken_label = ttk.Label(outline_adaptive_row, text="Darken %")
+        self.outline_colour_mode_dropdown_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_colour_mode_dropdown_menu = self._new_menu(self.outline_colour_mode_dropdown_button)
+        for value, label in OUTLINE_COLOUR_MODE_LABELS.items():
+            self.outline_colour_mode_dropdown_menu.add_command(
+                label=label,
+                command=lambda mode=value: self._select_outline_colour_mode(mode),
+            )
+        self.outline_colour_mode_dropdown_button.configure(menu=self.outline_colour_mode_dropdown_menu)
+        self.outline_adaptive_row = ttk.Frame(self.options_section)
+        self.outline_adaptive_darken_label = ttk.Label(self.outline_adaptive_row, text="Darken %")
         self.outline_adaptive_darken_label.pack(side=tk.LEFT)
         self.outline_adaptive_darken_spinbox = ttk.Spinbox(
-            outline_adaptive_row,
+            self.outline_adaptive_row,
             from_=0,
             to=100,
             textvariable=self.outline_adaptive_darken_percent_var,
@@ -852,24 +1046,24 @@ class PixelFixGui:
             command=self._on_outline_adaptive_darken_changed,
         )
         self.outline_adaptive_darken_spinbox.pack(side=tk.LEFT, padx=(8, 0))
+        self.outline_add_generated_colours_row = ttk.Frame(self.options_section)
         self.outline_add_generated_colours_toggle = ttk.Checkbutton(
-            outline_adaptive_row,
+            self.outline_add_generated_colours_row,
             text="Add Generated Colours",
             variable=self.outline_add_generated_colours_var,
             command=self._on_outline_add_generated_colours_changed,
         )
-        self.outline_add_generated_colours_toggle.pack(side=tk.LEFT, padx=(10, 0))
-        outline_remove_filter_row = ttk.Frame(palette_section)
-        outline_remove_filter_row.pack(fill=tk.X, pady=(6, 0))
+        self.outline_add_generated_colours_toggle.pack(side=tk.LEFT)
+        self.outline_remove_threshold_row = ttk.Frame(self.options_section)
         self.outline_remove_brightness_threshold_toggle = ttk.Checkbutton(
-            outline_remove_filter_row,
+            self.outline_remove_threshold_row,
             text="Brightness Threshold",
             variable=self.outline_remove_brightness_threshold_enabled_var,
             command=self._on_outline_remove_brightness_threshold_enabled_changed,
         )
         self.outline_remove_brightness_threshold_toggle.pack(side=tk.LEFT)
         self.outline_remove_brightness_threshold_spinbox = ttk.Spinbox(
-            outline_remove_filter_row,
+            self.outline_remove_threshold_row,
             from_=0,
             to=100,
             textvariable=self.outline_remove_brightness_threshold_percent_var,
@@ -877,24 +1071,29 @@ class PixelFixGui:
             command=self._on_outline_remove_brightness_threshold_percent_changed,
         )
         self.outline_remove_brightness_threshold_spinbox.pack(side=tk.LEFT, padx=(8, 0))
-        self.outline_remove_brightness_direction_dark_button = ttk.Radiobutton(
-            outline_remove_filter_row,
-            text="Dark",
-            value=OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK,
-            variable=self.outline_remove_brightness_threshold_direction_var,
-            command=self._on_outline_remove_brightness_threshold_direction_changed,
+        self.outline_remove_direction_row = ttk.Frame(self.options_section)
+        ttk.Label(self.outline_remove_direction_row, text="Dark/Bright").pack(side=tk.LEFT)
+        self.outline_remove_brightness_direction_dropdown_button = ttk.Menubutton(
+            self.outline_remove_direction_row,
+            textvariable=self.outline_remove_brightness_direction_display_var,
         )
-        self.outline_remove_brightness_direction_dark_button.pack(side=tk.LEFT, padx=(10, 0))
-        self.outline_remove_brightness_direction_bright_button = ttk.Radiobutton(
-            outline_remove_filter_row,
-            text="Bright",
-            value=OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_BRIGHT,
-            variable=self.outline_remove_brightness_threshold_direction_var,
-            command=self._on_outline_remove_brightness_threshold_direction_changed,
+        self.outline_remove_brightness_direction_dropdown_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.outline_remove_brightness_direction_dropdown_menu = self._new_menu(
+            self.outline_remove_brightness_direction_dropdown_button
         )
-        self.outline_remove_brightness_direction_bright_button.pack(side=tk.LEFT, padx=(6, 0))
+        for value, label in OUTLINE_REMOVE_DIRECTION_LABELS.items():
+            self.outline_remove_brightness_direction_dropdown_menu.add_command(
+                label=label,
+                command=lambda direction=value: self._select_outline_remove_brightness_direction(direction),
+            )
+        self.outline_remove_brightness_direction_dropdown_button.configure(
+            menu=self.outline_remove_brightness_direction_dropdown_menu
+        )
+        self.options_apply_row = ttk.Frame(self.options_section)
+        self.options_apply_button = ttk.Button(self.options_apply_row, text="Apply", command=self._apply_selected_tool_options)
+        self.options_apply_button.pack(side=tk.LEFT)
 
-        tools_section = self._create_section(sidebar, "Tools")
+        tools_section = self._create_section(sidebar, "Tools", fill_x=False, anchor=tk.W)
         tool_grid = ttk.Frame(tools_section)
         tool_grid.pack(anchor=tk.W, pady=(4, 0))
         pencil_cell, self.pencil_button = self._create_tool_button("pencil_button", tool_grid, "icon_pencil.png", self._toggle_pencil_mode, "Pencil")
@@ -927,18 +1126,32 @@ class PixelFixGui:
             self._toggle_rectangle_mode,
             "Rectangle",
         )
+        line_cell, self.line_button = self._create_tool_button(
+            "line_button",
+            tool_grid,
+            "icon_line.png",
+            self._toggle_line_mode,
+            "Line",
+        )
+        gradient_cell, self.gradient_button = self._create_tool_button(
+            "gradient_button",
+            tool_grid,
+            "icon_gradient.png",
+            self._toggle_gradient_mode,
+            "Gradient",
+        )
         add_outline_cell, self.add_outline_button = self._create_tool_button(
             "add_outline_button",
             tool_grid,
             "icon_outline_add.png",
-            self._add_outline_from_selection,
+            self._toggle_add_outline_mode,
             "Add Outline",
         )
         remove_outline_cell, self.remove_outline_button = self._create_tool_button(
             "remove_outline_button",
             tool_grid,
             "icon_outline_remove.png",
-            self._remove_outline,
+            self._toggle_remove_outline_mode,
             "Remove Outline",
         )
         undo_cell, self.undo_button = self._create_tool_button(
@@ -991,6 +1204,8 @@ class PixelFixGui:
                 bucket_cell,
                 circle_cell,
                 square_cell,
+                line_cell,
+                gradient_cell,
                 add_outline_cell,
                 remove_outline_cell,
                 undo_cell,
@@ -1022,12 +1237,12 @@ class PixelFixGui:
         )
         self.active_color_preview_label.place(x=TOOL_BUTTON_WIDTH, rely=0.5, anchor=tk.CENTER)
         self.active_color_preview_label.bind("<ButtonPress-1>", self._on_active_color_preview_click)
-        palette_section.pack_forget()
-        palette_section.pack(fill=tk.X, pady=(0, 10))
+        self.options_section.pack_forget()
+        self.options_section.pack(fill=tk.X, pady=(0, 10))
 
-        self.palette_column = ttk.Frame(body, width=280)
+        self.palette_column = ttk.Frame(body, width=PALETTE_COLUMN_DEFAULT_WIDTH)
         self.palette_column.pack(side=tk.RIGHT, fill=tk.Y)
-        self.palette_column.pack_propagate(False)
+        self._lock_palette_column_width()
         self.palette_column.grid_rowconfigure(0, weight=3)
         self.palette_column.grid_rowconfigure(1, weight=2)
         self.palette_column.grid_columnconfigure(0, weight=1)
@@ -1040,7 +1255,13 @@ class PixelFixGui:
         self.palette_frame.grid_rowconfigure(0, weight=1)
         self.palette_frame.grid_columnconfigure(0, weight=1)
         palette_swatches = ttk.Frame(self.palette_frame)
-        palette_swatches.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 8))
+        palette_swatches.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=PALETTE_COLUMN_CONTENT_PADDING,
+            pady=(PALETTE_COLUMN_CONTENT_PADDING, PALETTE_COLUMN_CONTENT_PADDING),
+        )
         palette_swatches.grid_rowconfigure(0, weight=1)
         palette_swatches.grid_columnconfigure(0, weight=1)
         self.palette_canvas = tk.Canvas(palette_swatches, background=APP_BG, bd=0, highlightthickness=0)
@@ -1048,56 +1269,111 @@ class PixelFixGui:
         self.palette_scrollbar = ttk.Scrollbar(palette_swatches, orient=tk.VERTICAL, command=self.palette_canvas.yview)
         self.palette_scrollbar.grid(row=0, column=1, sticky="ns")
         self.palette_canvas.configure(yscrollcommand=self.palette_scrollbar.set)
+        self.palette_canvas.bind("<Configure>", lambda _event: self._update_palette_strip(), add="+")
         self.palette_canvas.bind("<ButtonPress-1>", self._on_palette_canvas_click)
         self.palette_canvas.bind("<B1-Motion>", self._on_palette_canvas_drag)
         self.palette_canvas.bind("<ButtonRelease-1>", self._on_palette_canvas_release)
         self.palette_canvas.bind("<Double-Button-1>", self._on_palette_canvas_double_click)
         self.palette_canvas.bind("<ButtonPress-3>", self._on_palette_canvas_right_click)
         self.palette_canvas.bind("<MouseWheel>", self._on_palette_mouse_wheel, add="+")
-        self.palette_dropdown_button = ttk.Menubutton(self.palette_frame, textvariable=self.palette_dropdown_var)
-        self.palette_dropdown_button.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
-        self.palette_dropdown_menu = self._new_menu(self.palette_dropdown_button)
-        self.palette_dropdown_button.configure(menu=self.palette_dropdown_menu)
-        self.palette_dropdown_button.bind("<ButtonPress-1>", self._show_palette_dropdown_menu, add="+")
-        self._populate_palette_dropdown_menu()
+        self.palette_dropdown_button = ttk.Button(
+            self.palette_frame,
+            textvariable=self.palette_dropdown_var,
+            style="Compact.TButton",
+            width=12,
+            command=self._toggle_palette_browser,
+        )
+        self.palette_dropdown_button.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=PALETTE_COLUMN_CONTENT_PADDING,
+            pady=(0, PALETTE_COLUMN_CONTENT_PADDING),
+        )
+        self._refresh_palette_browser_button_state()
         palette_actions = ttk.Frame(self.palette_frame)
-        palette_actions.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        palette_actions.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=PALETTE_COLUMN_CONTENT_PADDING,
+            pady=(0, PALETTE_COLUMN_CONTENT_PADDING),
+        )
         palette_actions_top = ttk.Frame(palette_actions)
         palette_actions_top.pack(fill=tk.X)
-        self.add_palette_color_button = ttk.Button(palette_actions_top, text="+", width=3, command=self._toggle_palette_add_pick_mode)
+        self.add_palette_color_button = ttk.Button(
+            palette_actions_top,
+            text="+",
+            width=2,
+            style="Compact.TButton",
+            command=self._toggle_palette_add_pick_mode,
+        )
         self.add_palette_color_button.grid(row=0, column=0, sticky="ew")
-        self.remove_palette_color_button = ttk.Button(palette_actions_top, text="-", width=3, command=self._remove_selected_palette_colors)
-        self.remove_palette_color_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        self.reduce_palette_button = ttk.Button(palette_actions_top, text="Apply", command=self.reduce_palette_current_image)
-        self.reduce_palette_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        self.remove_palette_color_button = ttk.Button(
+            palette_actions_top,
+            text="-",
+            width=2,
+            style="Compact.TButton",
+            command=self._remove_selected_palette_colors,
+        )
+        self.remove_palette_color_button.grid(row=0, column=1, sticky="ew", padx=(PALETTE_ACTION_GAP, 0))
+        self.reduce_palette_button = ttk.Button(
+            palette_actions_top,
+            text="Apply",
+            style="Compact.TButton",
+            command=self.reduce_palette_current_image,
+        )
+        self.reduce_palette_button.grid(row=0, column=2, sticky="ew", padx=(PALETTE_ACTION_GAP, 0))
         for index in range(3):
             palette_actions_top.grid_columnconfigure(index, weight=1)
         palette_actions_middle = ttk.Frame(palette_actions)
-        palette_actions_middle.pack(fill=tk.X, pady=(4, 0))
-        self.merge_palette_button = ttk.Button(palette_actions_middle, text="Merge", command=self._merge_selected_palette_colors)
-        self.merge_palette_button.grid(row=0, column=0, sticky="ew")
-        self.ramp_palette_button = ttk.Button(palette_actions_middle, text="Ramp", command=self._ramp_selected_palette_colors)
-        self.ramp_palette_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        for index in range(2):
-            palette_actions_middle.grid_columnconfigure(index, weight=1)
+        palette_actions_middle.pack(fill=tk.X, pady=(PALETTE_ACTION_GAP, 0))
+        merge_palette_cell, self.merge_palette_button = self._create_palette_action_icon_button(
+            "merge_palette_button",
+            palette_actions_middle,
+            "icon_merge.png",
+            self._merge_selected_palette_colors,
+            "Merge selected palette colours",
+        )
+        merge_palette_cell.pack(side=tk.LEFT)
+        ramp_palette_cell, self.ramp_palette_button = self._create_palette_action_icon_button(
+            "ramp_palette_button",
+            palette_actions_middle,
+            "icon_ramp.png",
+            self._ramp_selected_palette_colors,
+            "Append ramps from selected palette colours",
+        )
+        ramp_palette_cell.pack(side=tk.LEFT, padx=(PALETTE_ACTION_GAP, 0))
         palette_actions_bottom = ttk.Frame(palette_actions)
-        palette_actions_bottom.pack(fill=tk.X, pady=(4, 0))
-        self.select_all_palette_button = ttk.Button(palette_actions_bottom, text="Select All", command=self._select_all_palette_colors)
+        palette_actions_bottom.pack(fill=tk.X, pady=(PALETTE_ACTION_GAP, 0))
+        self.select_all_palette_button = ttk.Button(
+            palette_actions_bottom,
+            text="All",
+            style="Compact.TButton",
+            command=self._select_all_palette_colors,
+        )
         self.select_all_palette_button.grid(row=0, column=0, sticky="ew")
-        self.clear_palette_selection_button = ttk.Button(palette_actions_bottom, text="Select None", command=self._clear_palette_selection)
-        self.clear_palette_selection_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.clear_palette_selection_button = ttk.Button(
+            palette_actions_bottom,
+            text="None",
+            style="Compact.TButton",
+            command=self._clear_palette_selection,
+        )
+        self.clear_palette_selection_button.grid(row=0, column=1, sticky="ew", padx=(PALETTE_ACTION_GAP, 0))
         self.invert_palette_selection_button = ttk.Button(
             palette_actions_bottom,
-            text="Inverse",
+            text="Invert",
+            style="Compact.TButton",
             command=self._invert_palette_selection,
         )
-        self.invert_palette_selection_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        self.invert_palette_selection_button.grid(row=0, column=2, sticky="ew", padx=(PALETTE_ACTION_GAP, 0))
         for index in range(3):
             palette_actions_bottom.grid_columnconfigure(index, weight=1)
 
         adjust_section = self._create_section(self.palette_column, "Adjust")
         adjust_section.pack_forget()
-        adjust_section.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        adjust_section.configure(padding=PALETTE_COLUMN_CONTENT_PADDING)
+        adjust_section.grid(row=1, column=0, sticky="nsew", pady=(PALETTE_COLUMN_CONTENT_PADDING, 0))
         reduction_row = ttk.Frame(adjust_section)
         reduction_row.pack(fill=tk.X)
         self.palette_reduction_spinbox = ttk.Spinbox(
@@ -1105,16 +1381,18 @@ class PixelFixGui:
             from_=1,
             to=256,
             textvariable=self.palette_reduction_colors_var,
-            width=8,
+            style="Compact.TSpinbox",
+            width=6,
             command=self._on_settings_changed,
         )
         self.palette_reduction_spinbox.pack(side=tk.LEFT)
         self.generate_override_palette_button = ttk.Button(
             reduction_row,
-            text="Reduce Palette",
+            text="Reduce",
+            style="Compact.TButton",
             command=self.generate_palette_from_image,
         )
-        self.generate_override_palette_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.generate_override_palette_button.pack(side=tk.LEFT, padx=(PALETTE_COLUMN_CONTENT_PADDING, 0))
         self.palette_adjustment_controls: list[tk.Scale] = []
         self.palette_brightness_scale = self._create_palette_adjustment_row(
             adjust_section,
@@ -1182,19 +1460,6 @@ class PixelFixGui:
         ttk.Label(status, textvariable=self.process_status_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         status_right = ttk.Frame(status)
         status_right.pack(side=tk.RIGHT)
-        self.pick_preview_frame = ttk.Frame(status_right)
-        self.pick_preview_swatch = tk.Label(
-            self.pick_preview_frame,
-            width=2,
-            height=1,
-            bg=APP_SURFACE_BG,
-            fg=APP_TEXT,
-            relief=tk.SOLID,
-            bd=1,
-        )
-        self.pick_preview_swatch.pack(side=tk.LEFT)
-        self.pick_preview_label = ttk.Label(self.pick_preview_frame, textvariable=self.pick_preview_var, width=9)
-        self.pick_preview_label.pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(status_right, textvariable=self.image_info_var).pack(side=tk.RIGHT)
 
         self.canvas.bind("<Configure>", lambda _event: self.redraw_canvas())
@@ -1203,10 +1468,32 @@ class PixelFixGui:
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind(
+            "<ButtonPress-2>",
+            lambda event: self._on_canvas_assigned_button_press(event, CANVAS_MOUSE_BUTTON_MIDDLE),
+        )
+        self.canvas.bind(
+            "<B2-Motion>",
+            lambda event: self._on_canvas_assigned_button_drag(event, CANVAS_MOUSE_BUTTON_MIDDLE),
+        )
+        self.canvas.bind(
+            "<ButtonRelease-2>",
+            lambda event: self._on_canvas_assigned_button_release(event, CANVAS_MOUSE_BUTTON_MIDDLE),
+        )
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Leave>", self._on_canvas_leave)
-        self.canvas.bind("<ButtonPress-3>", self._on_quick_compare_press)
-        self.canvas.bind("<ButtonRelease-3>", self._on_quick_compare_release)
+        self.canvas.bind(
+            "<ButtonPress-3>",
+            lambda event: self._on_canvas_assigned_button_press(event, CANVAS_MOUSE_BUTTON_RIGHT),
+        )
+        self.canvas.bind(
+            "<B3-Motion>",
+            lambda event: self._on_canvas_assigned_button_drag(event, CANVAS_MOUSE_BUTTON_RIGHT),
+        )
+        self.canvas.bind(
+            "<ButtonRelease-3>",
+            lambda event: self._on_canvas_assigned_button_release(event, CANVAS_MOUSE_BUTTON_RIGHT),
+        )
 
         self.pixel_width_spinbox.bind("<KeyRelease>", self._on_settings_changed, add="+")
         self.pixel_width_spinbox.bind("<<Increment>>", self._on_settings_changed, add="+")
@@ -1240,9 +1527,21 @@ class PixelFixGui:
         self._refresh_outline_control_states()
         self._bind_shortcuts()
 
-    def _create_section(self, parent: ttk.Frame, title: str) -> ttk.LabelFrame:
+    def _create_section(
+        self,
+        parent: ttk.Frame,
+        title: str,
+        *,
+        fill_x: bool = True,
+        anchor: str | None = None,
+    ) -> ttk.LabelFrame:
         frame = ttk.LabelFrame(parent, text=title.upper(), padding=SECTION_CONTENT_PADDING)
-        frame.pack(fill=tk.X, pady=(0, 10))
+        pack_kwargs: dict[str, object] = {"pady": (0, 10)}
+        if fill_x:
+            pack_kwargs["fill"] = tk.X
+        if anchor is not None:
+            pack_kwargs["anchor"] = anchor
+        frame.pack(**pack_kwargs)
         return frame
 
     @staticmethod
@@ -1431,6 +1730,32 @@ class PixelFixGui:
         self._tool_button_icons[cache_key] = cached_icon
         return cached_icon
 
+    def _palette_action_button_icon(self, asset_name: str, *, disabled: bool = False) -> ImageTk.PhotoImage:
+        cache_key = (asset_name, disabled)
+        cached_icon = self._palette_action_button_icons.get(cache_key)
+        if cached_icon is not None:
+            return cached_icon
+        asset_path = self._resource_path(f"assets/{asset_name}")
+        if not asset_path.exists():
+            asset_path = Path(__file__).resolve().parents[3] / "assets" / asset_name
+        with Image.open(asset_path) as image:
+            rgba = image.convert("RGBA")
+            if disabled:
+                alpha = rgba.getchannel("A").point(lambda value: (value * 3) // 4)
+                rgba = rgba.copy()
+                rgba.putalpha(alpha)
+            fitted = Image.new(
+                "RGBA",
+                (PALETTE_ACTION_ICON_BUTTON_SIZE - 2, PALETTE_ACTION_ICON_BUTTON_SIZE - 2),
+                (0, 0, 0, 0),
+            )
+            offset_x = (fitted.width - rgba.width) // 2 + PALETTE_ACTION_ICON_OFFSET[0]
+            offset_y = (fitted.height - rgba.height) // 2 + PALETTE_ACTION_ICON_OFFSET[1]
+            fitted.paste(rgba, (offset_x, offset_y), rgba)
+            cached_icon = ImageTk.PhotoImage(fitted)
+        self._palette_action_button_icons[cache_key] = cached_icon
+        return cached_icon
+
     def _create_tool_button(
         self,
         widget_name: str,
@@ -1459,8 +1784,53 @@ class PixelFixGui:
         self._tooltips.append(Tooltip(button, tooltip_text))
         return cell, button
 
+    def _create_palette_action_icon_button(
+        self,
+        widget_name: str,
+        parent: ttk.Frame,
+        asset_name: str,
+        command: object,
+        tooltip_text: str,
+    ) -> tuple[tk.Frame, ttk.Button]:
+        cell = tk.Frame(
+            parent,
+            width=PALETTE_ACTION_ICON_BUTTON_SIZE,
+            height=PALETTE_ACTION_ICON_BUTTON_SIZE,
+            bg=APP_BORDER,
+            bd=0,
+            highlightthickness=0,
+        )
+        cell.pack_propagate(False)
+        self._palette_action_button_assets[widget_name] = asset_name
+        self._palette_action_button_enabled[widget_name] = True
+        button = ttk.Button(
+            cell,
+            image=self._palette_action_button_icon(asset_name),
+            command=lambda name=widget_name, callback=command: self._invoke_palette_action_button(name, callback),
+            style="PaletteActionIcon.TButton",
+        )
+        button.place(
+            x=1,
+            y=1,
+            width=PALETTE_ACTION_ICON_BUTTON_SIZE - 2,
+            height=PALETTE_ACTION_ICON_BUTTON_SIZE - 2,
+        )
+        button.bind(
+            "<ButtonPress-1>",
+            lambda event, name=widget_name: "break" if not self._palette_action_button_enabled.get(name, True) else None,
+            add="+",
+        )
+        self._tooltips.append(Tooltip(button, tooltip_text))
+        return cell, button
+
     def _invoke_tool_button(self, widget_name: str, command: object) -> None:
         if not self._tool_button_enabled.get(widget_name, True):
+            return
+        if callable(command):
+            command()
+
+    def _invoke_palette_action_button(self, widget_name: str, command: object) -> None:
+        if not self._palette_action_button_enabled.get(widget_name, True):
             return
         if callable(command):
             command()
@@ -1480,6 +1850,25 @@ class PixelFixGui:
                 widget.state(("!disabled",))
             return
         widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+
+    def _set_palette_action_button_enabled(self, widget_name: str, enabled: bool) -> None:
+        if not hasattr(self, "_palette_action_button_enabled"):
+            self._palette_action_button_enabled = {}
+        self._palette_action_button_enabled[widget_name] = enabled
+        widget = getattr(self, widget_name, None)
+        if widget is None or not hasattr(widget, "configure"):
+            return
+        asset_name = getattr(self, "_palette_action_button_assets", {}).get(widget_name)
+        if asset_name is None:
+            widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+            return
+        widget.configure(
+            image=self._palette_action_button_icon(asset_name, disabled=not enabled),
+            style="PaletteActionIcon.TButton" if enabled else "PaletteActionIconDisabled.TButton",
+        )
+        widget_state = getattr(widget, "state", None)
+        if callable(widget_state):
+            widget_state(("!disabled",))
 
     def _create_palette_adjustment_row(
         self,
@@ -1519,8 +1908,14 @@ class PixelFixGui:
     def _on_body_configure(self, event: tk.Event) -> None:
         self._update_palette_column_width(event.width)
 
+    def _lock_palette_column_width(self) -> None:
+        if not hasattr(self, "palette_column"):
+            return
+        self.palette_column.pack_propagate(False)
+        self.palette_column.grid_propagate(False)
+
     def _update_palette_column_width(self, body_width: int) -> None:
-        palette_width = max(220, round(body_width * 0.2))
+        palette_width = max(PALETTE_COLUMN_MIN_WIDTH, round(body_width * PALETTE_COLUMN_WIDTH_RATIO))
         if hasattr(self, "palette_column"):
             self.palette_column.configure(width=palette_width)
 
@@ -1701,12 +2096,11 @@ class PixelFixGui:
             self._palette_selection_anchor_index = None
             self._palette_hit_regions = []
             self._displayed_palette = []
-            self.advanced_palette_preview = None
             self._set_pick_mode(None)
             self._clear_palette_undo_state()
             self._clear_palette_redo_state()
-            self._set_active_palette(None, "", None)
             self.quick_compare_active = False
+            self._mouse_button_action_state = None
             self.pan_x = 0
             self.pan_y = 0
             self.image_state = "loaded_original"
@@ -1753,9 +2147,6 @@ class PixelFixGui:
     def _populate_builtin_palette_menu(self) -> None:
         menu = self._menu_items["built_in_palettes"]
         menu.delete(0, tk.END)
-        self._builtin_palette_menu_entries = {}
-        self._builtin_palette_menus = []
-        self._register_builtin_palette_menu(menu)
         if not self.builtin_palette_entries:
             menu.add_command(label="(none)", state=tk.DISABLED)
             return
@@ -1768,80 +2159,20 @@ class PixelFixGui:
                 parent_path = (*parent_path, folder_label)
                 if parent_path not in submenus:
                     submenu = self._new_menu(parent_menu)
-                    self._register_builtin_palette_menu(submenu)
                     parent_menu.add_cascade(label=folder_label, menu=submenu)
                     submenus[parent_path] = submenu
                 parent_menu = submenus[parent_path]
             parent_menu.add_command(label=entry.label, command=lambda value=entry: self._select_builtin_palette(value))
-            index = parent_menu.index(tk.END)
-            if isinstance(index, int):
-                self._builtin_palette_menu_entries[(parent_menu, index)] = entry
-
-    def _populate_palette_dropdown_menu(self) -> None:
-        menu = getattr(self, "palette_dropdown_menu", None)
-        if menu is None:
-            return
-        menu.delete(0, tk.END)
-        self._register_builtin_palette_menu(menu)
-        if not self.builtin_palette_entries:
-            menu.add_command(label="(none)", state=tk.DISABLED)
-            if hasattr(self, "palette_dropdown_button"):
-                self.palette_dropdown_button.configure(state=tk.DISABLED)
-            self._update_palette_dropdown_label()
-            return
-        if hasattr(self, "palette_dropdown_button"):
-            self.palette_dropdown_button.configure(state=tk.NORMAL)
-        for entry in self.builtin_palette_entries:
-            menu.add_command(label=entry.source_label, command=lambda value=entry: self._select_builtin_palette(value))
-            index = menu.index(tk.END)
-            if isinstance(index, int):
-                self._builtin_palette_menu_entries[(menu, index)] = entry
-        self._update_palette_dropdown_label()
-
-    def _register_builtin_palette_menu(self, menu: tk.Menu) -> None:
-        if menu in self._builtin_palette_menus:
-            return
-        self._builtin_palette_menus.append(menu)
-        menu.bind("<<MenuSelect>>", lambda _event, target=menu: self._on_builtin_palette_menu_select(target), add="+")
-        menu.bind("<Unmap>", lambda _event: self.root.after_idle(self._clear_builtin_palette_preview_if_menu_closed), add="+")
-
-    def _on_builtin_palette_menu_select(self, menu: tk.Menu) -> None:
-        try:
-            index = menu.index(tk.ACTIVE)
-        except tk.TclError:
-            index = None
-        if not isinstance(index, int):
-            self._clear_builtin_palette_preview()
-            return
-        preview_entry = self._builtin_palette_menu_entries.get((menu, index))
-        if preview_entry is None:
-            self._clear_builtin_palette_preview()
-            return
-        if getattr(self, "_builtin_palette_preview_entry", None) == preview_entry:
-            return
-        self._builtin_palette_preview_entry = preview_entry
-        self._update_palette_dropdown_label()
-        self._update_palette_strip()
 
     def _clear_builtin_palette_preview(self) -> None:
         if getattr(self, "_builtin_palette_preview_entry", None) is None:
             return
         self._builtin_palette_preview_entry = None
-        self._update_palette_dropdown_label()
         self._update_palette_strip()
-
-    def _clear_builtin_palette_preview_if_menu_closed(self) -> None:
-        if any(menu.winfo_ismapped() for menu in getattr(self, "_builtin_palette_menus", [])):
-            return
-        self._clear_builtin_palette_preview()
 
     def _update_palette_dropdown_label(self) -> None:
         variable = getattr(self, "palette_dropdown_var", None)
         if variable is None:
-            return
-        preview_entry = getattr(self, "_builtin_palette_preview_entry", None)
-        if preview_entry is not None:
-            variable.set(preview_entry.source_label)
             return
         active_path = getattr(self, "active_palette_path", None)
         if active_path:
@@ -1851,17 +2182,339 @@ class PixelFixGui:
                 return
         variable.set("Built-in palettes")
 
-    def _show_palette_dropdown_menu(self, _event: tk.Event | None = None) -> str:
+    def _refresh_palette_browser_button_state(self) -> None:
         button = getattr(self, "palette_dropdown_button", None)
-        menu = getattr(self, "palette_dropdown_menu", None)
-        if button is None or menu is None:
+        if button is None or not hasattr(button, "configure"):
+            return
+        button.configure(state=tk.NORMAL if self.builtin_palette_entries else tk.DISABLED)
+        self._update_palette_dropdown_label()
+
+    def _toggle_palette_browser(self) -> None:
+        if getattr(self, "_palette_browser_window", None) is None:
+            self._open_palette_browser()
+        else:
+            self._close_palette_browser()
+
+    def _open_palette_browser(self) -> None:
+        if getattr(self, "_palette_browser_window", None) is not None:
+            self._position_palette_browser()
+            return
+        button = getattr(self, "palette_dropdown_button", None)
+        if button is None or not self.builtin_palette_entries:
+            return
+        browser = tk.Toplevel(self.root, bg=APP_BORDER, bd=0, highlightthickness=0)
+        browser.withdraw()
+        browser.overrideredirect(True)
+        browser.transient(self.root)
+        browser.bind("<Escape>", self._on_palette_browser_escape, add="+")
+        self._palette_browser_window = browser
+
+        shell = tk.Frame(browser, bg=APP_BORDER, bd=0, highlightthickness=0)
+        shell.pack(fill=tk.BOTH, expand=True)
+        content = tk.Frame(shell, bg=APP_BG, bd=0, highlightthickness=0)
+        content.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        search_entry = ttk.Entry(content, textvariable=self._palette_browser_search_var, style="Compact.TEntry")
+        search_entry.pack(fill=tk.X, padx=8, pady=(8, 6))
+        search_entry.bind("<Escape>", self._on_palette_browser_escape, add="+")
+        search_entry.bind("<Enter>", lambda _event: self._clear_builtin_palette_preview(), add="+")
+        self._bind_palette_browser_mouse_wheel(search_entry)
+        self._palette_browser_search_entry = search_entry
+
+        list_shell = tk.Frame(content, bg=APP_BG, bd=0, highlightthickness=0)
+        list_shell.pack(fill=tk.BOTH, expand=True, padx=8)
+        list_canvas = tk.Canvas(list_shell, bg=APP_BG, bd=0, highlightthickness=0)
+        list_canvas.configure(yscrollincrement=20)
+        list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar = ttk.Scrollbar(list_shell, orient=tk.VERTICAL, command=list_canvas.yview)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        list_canvas.configure(yscrollcommand=list_scrollbar.set)
+        list_inner = tk.Frame(list_canvas, bg=APP_BG, bd=0, highlightthickness=0)
+        list_window = list_canvas.create_window((0, 0), window=list_inner, anchor="nw")
+        list_inner.bind(
+            "<Configure>",
+            lambda _event, canvas=list_canvas: canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0)),
+            add="+",
+        )
+        list_canvas.bind(
+            "<Configure>",
+            lambda event, canvas=list_canvas, window_id=list_window: canvas.itemconfigure(window_id, width=event.width),
+            add="+",
+        )
+        list_canvas.bind("<MouseWheel>", self._on_palette_browser_mouse_wheel, add="+")
+        list_canvas.bind("<Leave>", lambda _event: self._clear_builtin_palette_preview(), add="+")
+        list_inner.bind("<Leave>", lambda _event: self._clear_builtin_palette_preview(), add="+")
+        self._bind_palette_browser_mouse_wheel(list_shell)
+        self._bind_palette_browser_mouse_wheel(list_canvas)
+        self._bind_palette_browser_mouse_wheel(list_scrollbar)
+        self._bind_palette_browser_mouse_wheel(list_inner)
+        self._palette_browser_list_canvas = list_canvas
+        self._palette_browser_list_inner = list_inner
+
+        footer = tk.Frame(content, bg=APP_BG, bd=0, highlightthickness=0)
+        footer.pack(fill=tk.X, padx=8, pady=(6, 8))
+        footer.bind("<Enter>", lambda _event: self._clear_builtin_palette_preview(), add="+")
+        self._bind_palette_browser_mouse_wheel(footer)
+        load_button = ttk.Button(footer, text="Load Palette...", style="Compact.TButton", command=self._load_palette_file_from_browser)
+        load_button.pack(side=tk.LEFT)
+        close_button = ttk.Button(footer, text="Close", style="Compact.TButton", command=self._close_palette_browser)
+        close_button.pack(side=tk.RIGHT)
+        load_button.bind("<Enter>", lambda _event: self._clear_builtin_palette_preview(), add="+")
+        close_button.bind("<Enter>", lambda _event: self._clear_builtin_palette_preview(), add="+")
+        self._bind_palette_browser_mouse_wheel(load_button)
+        self._bind_palette_browser_mouse_wheel(close_button)
+
+        self._refresh_palette_browser_rows()
+        self._position_palette_browser()
+        browser.deiconify()
+        browser.lift()
+        search_entry.focus_set()
+
+        self._bind_palette_browser_root_clicks()
+        if getattr(self, "_palette_browser_search_trace_id", None) is None:
+            self._palette_browser_search_trace_id = self._palette_browser_search_var.trace_add(
+                "write",
+                lambda *_args: self._refresh_palette_browser_rows(),
+            )
+
+    def _close_palette_browser(self) -> None:
+        browser = getattr(self, "_palette_browser_window", None)
+        if browser is None:
+            return
+        self._unbind_palette_browser_root_clicks()
+        self._clear_builtin_palette_preview()
+        self._palette_browser_displayed_entries = []
+        self._palette_browser_empty_label = None
+        self._palette_browser_window = None
+        for attribute_name in (
+            "_palette_browser_search_entry",
+            "_palette_browser_list_canvas",
+            "_palette_browser_list_inner",
+        ):
+            if hasattr(self, attribute_name):
+                setattr(self, attribute_name, None)
+        if browser.winfo_exists():
+            browser.destroy()
+
+    def _bind_palette_browser_root_clicks(self) -> None:
+        root = getattr(self, "root", None)
+        if root is None:
+            return
+        self._unbind_palette_browser_root_clicks()
+        for sequence in ("<ButtonPress-1>", "<ButtonPress-2>", "<ButtonPress-3>"):
+            bind_id = root.bind(sequence, self._on_palette_browser_root_click, add="+")
+            self._palette_browser_root_bind_ids[sequence] = bind_id
+
+    def _unbind_palette_browser_root_clicks(self) -> None:
+        root = getattr(self, "root", None)
+        if root is None:
+            self._palette_browser_root_bind_ids = {}
+            return
+        for sequence, bind_id in list(getattr(self, "_palette_browser_root_bind_ids", {}).items()):
+            root.unbind(sequence, bind_id)
+        self._palette_browser_root_bind_ids = {}
+
+    def _palette_browser_contains_widget(self, widget: object) -> bool:
+        browser = getattr(self, "_palette_browser_window", None)
+        if browser is None:
+            return False
+        current = widget
+        while current is not None:
+            if current == browser:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _button_contains_widget(self, widget: object, button_name: str) -> bool:
+        button = getattr(self, button_name, None)
+        current = widget
+        while current is not None:
+            if current == button:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _on_palette_browser_root_click(self, event: tk.Event | None = None) -> None:
+        widget = getattr(event, "widget", None)
+        if self._palette_browser_contains_widget(widget) or self._button_contains_widget(widget, "palette_dropdown_button"):
+            return
+        self._close_palette_browser()
+
+    def _on_palette_browser_escape(self, _event: tk.Event | None = None) -> str:
+        self._close_palette_browser()
+        return "break"
+
+    def _position_palette_browser(self) -> None:
+        browser = getattr(self, "_palette_browser_window", None)
+        button = getattr(self, "palette_dropdown_button", None)
+        root = getattr(self, "root", None)
+        if browser is None or button is None or root is None:
+            return
+        root.update_idletasks()
+        width, height, x_position, y_position = self._compute_palette_browser_geometry()
+        browser.geometry(f"{width}x{height}+{x_position}+{y_position}")
+
+    def _compute_palette_browser_geometry(self) -> tuple[int, int, int, int]:
+        button = getattr(self, "palette_dropdown_button", None)
+        root = getattr(self, "root", None)
+        if button is None or root is None:
+            return (PALETTE_BROWSER_WIDTH, PALETTE_BROWSER_HEIGHT, PALETTE_BROWSER_MARGIN, PALETTE_BROWSER_MARGIN)
+        screen_width = max(PALETTE_BROWSER_WIDTH + (PALETTE_BROWSER_MARGIN * 2), int(root.winfo_screenwidth()))
+        screen_height = max(PALETTE_BROWSER_HEIGHT + (PALETTE_BROWSER_MARGIN * 2), int(root.winfo_screenheight()))
+        width = min(PALETTE_BROWSER_WIDTH, screen_width - (PALETTE_BROWSER_MARGIN * 2))
+        height = min(PALETTE_BROWSER_HEIGHT, screen_height - (PALETTE_BROWSER_MARGIN * 2))
+        button_x = int(button.winfo_rootx())
+        button_y = int(button.winfo_rooty())
+        button_width = int(button.winfo_width())
+        button_height = int(button.winfo_height())
+        x_position = button_x - width - PALETTE_BROWSER_GAP
+        y_position = button_y
+        if x_position < PALETTE_BROWSER_MARGIN:
+            x_position = max(
+                PALETTE_BROWSER_MARGIN,
+                min(button_x + button_width - width, screen_width - width - PALETTE_BROWSER_MARGIN),
+            )
+            y_position = button_y + button_height + PALETTE_BROWSER_GAP
+            if y_position + height > screen_height - PALETTE_BROWSER_MARGIN:
+                y_position = button_y - height - PALETTE_BROWSER_GAP
+        x_position = max(PALETTE_BROWSER_MARGIN, min(x_position, screen_width - width - PALETTE_BROWSER_MARGIN))
+        y_position = max(PALETTE_BROWSER_MARGIN, min(y_position, screen_height - height - PALETTE_BROWSER_MARGIN))
+        return width, height, x_position, y_position
+
+    def _filtered_builtin_palette_groups(self, query: str | None = None) -> list[tuple[str, list[PaletteCatalogEntry]]]:
+        normalized_query = (query or "").strip().lower()
+        grouped: dict[str, list[PaletteCatalogEntry]] = {}
+        ordered_groups: list[str] = []
+        for entry in self.builtin_palette_entries:
+            category = " / ".join(entry.menu_path) if entry.menu_path else "General"
+            haystack = f"{entry.label} {' / '.join(entry.menu_path)}".lower()
+            if normalized_query and normalized_query not in haystack:
+                continue
+            if category not in grouped:
+                grouped[category] = []
+                ordered_groups.append(category)
+            grouped[category].append(entry)
+        return [(category, grouped[category]) for category in ordered_groups if grouped[category]]
+
+    def _refresh_palette_browser_rows(self) -> None:
+        container = getattr(self, "_palette_browser_list_inner", None)
+        if container is None:
+            return
+        for child in list(container.winfo_children()):
+            child.destroy()
+        self._palette_browser_displayed_entries = []
+        self._palette_browser_empty_label = None
+
+        groups = self._filtered_builtin_palette_groups(self._palette_browser_search_var.get())
+        if not groups:
+            self._clear_builtin_palette_preview()
+            empty_label = tk.Label(
+                container,
+                text="No palettes match your search.",
+                bg=APP_BG,
+                fg=APP_MUTED_TEXT,
+                anchor="w",
+                justify=tk.LEFT,
+            )
+            empty_label.pack(fill=tk.X, padx=4, pady=(4, 0))
+            self._palette_browser_empty_label = empty_label
+            return
+
+        for category, entries in groups:
+            header = tk.Label(
+                container,
+                text=category,
+                bg=APP_BG,
+                fg=APP_MUTED_TEXT,
+                anchor="w",
+                justify=tk.LEFT,
+            )
+            header.pack(fill=tk.X, padx=4, pady=(6, 2))
+            self._bind_palette_browser_mouse_wheel(header)
+            for entry in entries:
+                self._palette_browser_displayed_entries.append(entry)
+                row = tk.Frame(container, bg=APP_SURFACE_BG, bd=0, highlightthickness=0)
+                row.pack(fill=tk.X, padx=0, pady=(0, 4))
+                swatch_strip = tk.Canvas(
+                    row,
+                    width=PALETTE_BROWSER_SWATCH_STRIP_COUNT * PALETTE_BROWSER_SWATCH_STRIP_SIZE,
+                    height=PALETTE_BROWSER_SWATCH_STRIP_SIZE,
+                    bg=APP_SURFACE_BG,
+                    bd=0,
+                    highlightthickness=0,
+                )
+                swatch_strip.pack(side=tk.LEFT, padx=(6, 6), pady=6)
+                self._bind_palette_browser_mouse_wheel(row)
+                self._bind_palette_browser_mouse_wheel(swatch_strip)
+                for index, label in enumerate(entry.colors[:PALETTE_BROWSER_SWATCH_STRIP_COUNT]):
+                    x0 = index * PALETTE_BROWSER_SWATCH_STRIP_SIZE
+                    swatch_strip.create_rectangle(
+                        x0,
+                        0,
+                        x0 + PALETTE_BROWSER_SWATCH_STRIP_SIZE,
+                        PALETTE_BROWSER_SWATCH_STRIP_SIZE,
+                        fill=f"#{label:06X}",
+                        outline="",
+                    )
+                text_frame = tk.Frame(row, bg=APP_SURFACE_BG, bd=0, highlightthickness=0)
+                text_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), pady=4)
+                name_label = tk.Label(
+                    text_frame,
+                    text=entry.label,
+                    bg=APP_SURFACE_BG,
+                    fg=APP_TEXT,
+                    anchor="w",
+                    justify=tk.LEFT,
+                )
+                name_label.pack(fill=tk.X)
+                self._bind_palette_browser_mouse_wheel(text_frame)
+                self._bind_palette_browser_mouse_wheel(name_label)
+                path_text = " / ".join(entry.menu_path) if entry.menu_path else "General"
+                path_label = tk.Label(
+                    text_frame,
+                    text=path_text,
+                    bg=APP_SURFACE_BG,
+                    fg=APP_MUTED_TEXT,
+                    anchor="w",
+                    justify=tk.LEFT,
+                )
+                path_label.pack(fill=tk.X)
+                self._bind_palette_browser_mouse_wheel(path_label)
+                for widget in (row, swatch_strip, text_frame, name_label, path_label):
+                    widget.bind("<Enter>", lambda _event, value=entry: self._preview_builtin_palette(value), add="+")
+                    widget.bind("<ButtonPress-1>", lambda _event, value=entry: self._select_builtin_palette_from_browser(value), add="+")
+        if getattr(self, "_builtin_palette_preview_entry", None) not in self._palette_browser_displayed_entries:
+            self._clear_builtin_palette_preview()
+
+    def _preview_builtin_palette(self, entry: PaletteCatalogEntry | None) -> None:
+        if entry is None:
+            self._clear_builtin_palette_preview()
+            return
+        if getattr(self, "_builtin_palette_preview_entry", None) == entry:
+            return
+        self._builtin_palette_preview_entry = entry
+        self._update_palette_strip()
+
+    def _bind_palette_browser_mouse_wheel(self, widget: tk.Misc | None) -> None:
+        if widget is None:
+            return
+        widget.bind("<MouseWheel>", self._on_palette_browser_mouse_wheel, add="+")
+
+    def _select_builtin_palette_from_browser(self, entry: PaletteCatalogEntry) -> None:
+        self._close_palette_browser()
+        self._select_builtin_palette(entry)
+
+    def _load_palette_file_from_browser(self) -> None:
+        self._close_palette_browser()
+        self.load_palette_file()
+
+    def _on_palette_browser_mouse_wheel(self, event: tk.Event) -> str:
+        canvas = getattr(self, "_palette_browser_list_canvas", None)
+        if canvas is None:
             return "break"
-        try:
-            x_position = max(0, button.winfo_rootx() - PALETTE_DROPDOWN_POST_X_OFFSET)
-            y_position = button.winfo_rooty() + button.winfo_height()
-            menu.tk_popup(x_position, y_position)
-        finally:
-            menu.grab_release()
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return "break"
+        canvas.yview_scroll(-1 if delta > 0 else 1, "units")
         return "break"
 
     def _on_palette_mouse_wheel(self, event: tk.Event) -> str:
@@ -1890,15 +2543,13 @@ class PixelFixGui:
 
         resolved_path = self._resolve_palette_path(path_value)
         if resolved_path is None:
-            self._set_active_palette(None, "", None)
-            return True
+            return False
 
         entry = self._builtin_palette_by_path.get(resolved_path)
         try:
             palette = list(entry.colors) if entry is not None else load_palette(Path(resolved_path))
         except Exception:  # noqa: BLE001
-            self._set_active_palette(None, "", None)
-            return True
+            return False
 
         source_value = persisted.get("active_palette_source")
         if entry is not None:
@@ -1908,7 +2559,20 @@ class PixelFixGui:
         else:
             source = f"Loaded: {Path(resolved_path).name}"
         self._set_active_palette(palette, source, resolved_path)
-        return False
+        return True
+
+    def _load_default_palette(self) -> bool:
+        resolved_path = self._resolve_palette_path(self._resource_path(DEFAULT_PALETTE_RESOURCE))
+        if resolved_path is None:
+            return False
+        entry = self._builtin_palette_by_path.get(resolved_path)
+        try:
+            palette = list(entry.colors) if entry is not None else load_palette(Path(resolved_path))
+        except Exception:  # noqa: BLE001
+            return False
+        source = f"Built-in: {entry.source_label}" if entry is not None else f"Loaded: {Path(resolved_path).name}"
+        self._set_active_palette(palette, source, resolved_path)
+        return True
 
     @staticmethod
     def _resolve_palette_path(path_value: str | Path | None) -> str | None:
@@ -2111,9 +2775,47 @@ class PixelFixGui:
             CANVAS_TOOL_MODE_ERASER,
             CANVAS_TOOL_MODE_ELLIPSE,
             CANVAS_TOOL_MODE_RECTANGLE,
+            CANVAS_TOOL_MODE_LINE,
+            CANVAS_TOOL_MODE_GRADIENT,
+            CANVAS_TOOL_MODE_ADD_OUTLINE,
+            CANVAS_TOOL_MODE_REMOVE_OUTLINE,
         }:
             return normalized
         return None
+
+    @staticmethod
+    def _coerce_mouse_button_action(value: object, *, default: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in MOUSE_BUTTON_ACTION_VALUES:
+            return normalized
+        return default
+
+    def _mouse_button_action(self, button: int) -> str:
+        if button == CANVAS_MOUSE_BUTTON_MIDDLE:
+            variable = getattr(self, "middle_mouse_action_var", None)
+            default = MOUSE_BUTTON_DEFAULT_MIDDLE_ACTION
+        else:
+            variable = getattr(self, "right_mouse_action_var", None)
+            default = MOUSE_BUTTON_DEFAULT_RIGHT_ACTION
+        getter = getattr(variable, "get", None)
+        try:
+            value = getter() if callable(getter) else variable
+        except Exception:
+            value = default
+        return self._coerce_mouse_button_action(value, default=default)
+
+    def _select_mouse_button_action(self, button: int, action: str) -> None:
+        default = MOUSE_BUTTON_DEFAULT_MIDDLE_ACTION if button == CANVAS_MOUSE_BUTTON_MIDDLE else MOUSE_BUTTON_DEFAULT_RIGHT_ACTION
+        normalized = self._coerce_mouse_button_action(action, default=default)
+        variable = getattr(
+            self,
+            "middle_mouse_action_var" if button == CANVAS_MOUSE_BUTTON_MIDDLE else "right_mouse_action_var",
+            None,
+        )
+        setter = getattr(variable, "set", None)
+        if callable(setter):
+            setter(normalized)
+        self._schedule_state_persist_if_ready()
 
     def _canvas_tool_mode_value(self) -> str | None:
         mode = self._coerce_canvas_tool_mode(getattr(self, "canvas_tool_mode", None))
@@ -2123,6 +2825,41 @@ class PixelFixGui:
             return CANVAS_TOOL_MODE_PALETTE_PICK
         if getattr(self, "transparency_pick_mode", False):
             return CANVAS_TOOL_MODE_TRANSPARENCY_PICK
+        return None
+
+    @staticmethod
+    def _is_outline_tool_mode(mode: str | None) -> bool:
+        return mode in {CANVAS_TOOL_MODE_ADD_OUTLINE, CANVAS_TOOL_MODE_REMOVE_OUTLINE}
+
+    @staticmethod
+    def _is_crosshair_tool_mode(mode: str | None) -> bool:
+        return mode in {
+            CANVAS_TOOL_MODE_PALETTE_PICK,
+            CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK,
+            CANVAS_TOOL_MODE_TRANSPARENCY_PICK,
+            CANVAS_TOOL_MODE_BUCKET,
+            CANVAS_TOOL_MODE_PENCIL,
+            CANVAS_TOOL_MODE_ERASER,
+            CANVAS_TOOL_MODE_ELLIPSE,
+            CANVAS_TOOL_MODE_RECTANGLE,
+            CANVAS_TOOL_MODE_LINE,
+        }
+
+    def _options_tool_mode(self) -> str | None:
+        mode = self._canvas_tool_mode_value()
+        if mode in {
+            CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK,
+            CANVAS_TOOL_MODE_BUCKET,
+            CANVAS_TOOL_MODE_PENCIL,
+            CANVAS_TOOL_MODE_ERASER,
+            CANVAS_TOOL_MODE_ELLIPSE,
+            CANVAS_TOOL_MODE_RECTANGLE,
+            CANVAS_TOOL_MODE_LINE,
+            CANVAS_TOOL_MODE_GRADIENT,
+            CANVAS_TOOL_MODE_ADD_OUTLINE,
+            CANVAS_TOOL_MODE_REMOVE_OUTLINE,
+        }:
+            return mode
         return None
 
     def _set_canvas_tool_mode(self, mode: str | None) -> None:
@@ -2158,11 +2895,24 @@ class PixelFixGui:
         elif normalized == CANVAS_TOOL_MODE_RECTANGLE:
             self._set_view("processed")
             self.process_status_var.set("Click and drag on the processed preview to draw a rectangle. Hold Shift to constrain to a square.")
+        elif normalized == CANVAS_TOOL_MODE_LINE:
+            self._set_view("processed")
+            self.process_status_var.set("Click and drag on the processed preview to draw a line.")
+        elif normalized == CANVAS_TOOL_MODE_GRADIENT:
+            self._set_view("processed")
+            self.process_status_var.set("Gradient tool is not implemented yet.")
+        elif normalized == CANVAS_TOOL_MODE_ADD_OUTLINE:
+            self._set_view("processed")
+            self.process_status_var.set("Adjust add outline options, then click Apply.")
+        elif normalized == CANVAS_TOOL_MODE_REMOVE_OUTLINE:
+            self._set_view("processed")
+            self.process_status_var.set("Adjust remove outline options, then click Apply.")
         if had_shape_preview and hasattr(self, "redraw_canvas"):
             self.redraw_canvas()
         canvas = getattr(self, "canvas", None)
         if canvas is not None and hasattr(canvas, "configure") and not getattr(self, "dragging", False):
             canvas.configure(cursor=self._cursor_for_pointer())
+        self._refresh_tool_options_panel()
         self._refresh_tool_button_styles()
 
     def _set_pick_mode(self, mode: str | None) -> None:
@@ -2172,6 +2922,113 @@ class PixelFixGui:
             None: None,
         }.get(mode, None)
         self._set_canvas_tool_mode(translated)
+
+    def _set_options_helper_text(self, value: str) -> None:
+        variable = getattr(self, "options_helper_var", None)
+        setter = getattr(variable, "set", None)
+        if callable(setter):
+            setter(value)
+
+    @staticmethod
+    def _set_packed(widget: object, visible: bool, **pack_kwargs: object) -> None:
+        if widget is None:
+            return
+        pack_forget = getattr(widget, "pack_forget", None)
+        pack = getattr(widget, "pack", None)
+        winfo_manager = getattr(widget, "winfo_manager", None)
+        if visible:
+            if callable(pack):
+                manager = winfo_manager() if callable(winfo_manager) else ""
+                if not manager:
+                    pack(**pack_kwargs)
+        elif callable(pack_forget):
+            pack_forget()
+
+    def _refresh_pick_preview_widgets(self) -> None:
+        preview_frame = getattr(self, "pick_preview_frame", None)
+        empty_label = getattr(self, "pick_preview_empty_label", None)
+        active = self._options_tool_mode() == CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK
+        sample = getattr(self, "_pick_preview_sample", None)
+        self._set_packed(preview_frame, active and sample is not None, fill=tk.X, pady=(4, 0))
+        self._set_packed(empty_label, active and sample is None, anchor=tk.W, pady=(4, 0))
+
+    def _can_select_outline_tool(self) -> bool:
+        return self._current_output_result() is not None and self.image_state != "processing"
+
+    def _can_apply_add_outline_tool(self) -> bool:
+        if not self._can_select_outline_tool():
+            return False
+        return self._outline_adaptive_enabled() or self._selected_palette_outline_label() is not None
+
+    def _can_apply_remove_outline_tool(self) -> bool:
+        return self._can_select_outline_tool()
+
+    def _refresh_tool_options_panel(self) -> None:
+        for widget_name in (
+            "options_helper_label",
+            "brush_width_row",
+            "brush_shape_row",
+            "pick_preview_empty_label",
+            "pick_preview_frame",
+            "outline_pixel_perfect_row",
+            "outline_colour_mode_row",
+            "outline_adaptive_row",
+            "outline_add_generated_colours_row",
+            "outline_remove_threshold_row",
+            "outline_remove_direction_row",
+            "options_apply_row",
+        ):
+            self._set_packed(getattr(self, widget_name, None), False)
+
+        mode = self._options_tool_mode()
+        show_helper = False
+        helper_text = ""
+
+        if mode is None:
+            show_helper = True
+            helper_text = "Select a tool to see its options."
+        elif mode == CANVAS_TOOL_MODE_BUCKET:
+            show_helper = True
+            helper_text = "Bucket has no options."
+        elif mode in {CANVAS_TOOL_MODE_PENCIL, CANVAS_TOOL_MODE_ERASER}:
+            self._set_packed(getattr(self, "brush_width_row", None), True, fill=tk.X, pady=(4, 0))
+            self._set_packed(getattr(self, "brush_shape_row", None), True, fill=tk.X, pady=(6, 0))
+        elif mode == CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK:
+            self._refresh_pick_preview_widgets()
+        elif mode in {CANVAS_TOOL_MODE_ELLIPSE, CANVAS_TOOL_MODE_RECTANGLE, CANVAS_TOOL_MODE_LINE}:
+            self._set_packed(getattr(self, "brush_width_row", None), True, fill=tk.X, pady=(4, 0))
+        elif mode == CANVAS_TOOL_MODE_GRADIENT:
+            show_helper = True
+            helper_text = "Gradient tool is not implemented yet."
+        elif mode == CANVAS_TOOL_MODE_ADD_OUTLINE:
+            self._set_packed(getattr(self, "brush_width_row", None), True, fill=tk.X, pady=(4, 0))
+            self._set_packed(getattr(self, "outline_pixel_perfect_row", None), True, fill=tk.X, pady=(6, 0))
+            self._set_packed(getattr(self, "outline_colour_mode_row", None), True, fill=tk.X, pady=(6, 0))
+            if self._outline_adaptive_enabled():
+                self._set_packed(getattr(self, "outline_adaptive_row", None), True, fill=tk.X, pady=(6, 0))
+                self._set_packed(getattr(self, "outline_add_generated_colours_row", None), True, fill=tk.X, pady=(6, 0))
+            elif not self._can_apply_add_outline_tool():
+                show_helper = True
+                helper_text = "Select exactly one palette colour to use Selected outline colour."
+            self._set_packed(getattr(self, "options_apply_row", None), True, fill=tk.X, pady=(8, 0))
+        elif mode == CANVAS_TOOL_MODE_REMOVE_OUTLINE:
+            self._set_packed(getattr(self, "brush_width_row", None), True, fill=tk.X, pady=(4, 0))
+            self._set_packed(getattr(self, "outline_pixel_perfect_row", None), True, fill=tk.X, pady=(6, 0))
+            self._set_packed(getattr(self, "outline_remove_threshold_row", None), True, fill=tk.X, pady=(6, 0))
+            if self._outline_remove_brightness_threshold_enabled():
+                self._set_packed(getattr(self, "outline_remove_direction_row", None), True, fill=tk.X, pady=(6, 0))
+            self._set_packed(getattr(self, "options_apply_row", None), True, fill=tk.X, pady=(8, 0))
+
+        if show_helper:
+            self._set_options_helper_text(helper_text)
+            self._set_packed(getattr(self, "options_helper_label", None), True, anchor=tk.W, pady=(4, 0))
+
+    def _apply_selected_tool_options(self) -> None:
+        mode = self._options_tool_mode()
+        if mode == CANVAS_TOOL_MODE_ADD_OUTLINE:
+            self._add_outline_from_selection()
+        elif mode == CANVAS_TOOL_MODE_REMOVE_OUTLINE:
+            self._remove_outline()
 
     def _brush_width(self) -> int:
         variable = getattr(self, "brush_width_var", None)
@@ -2201,6 +3058,15 @@ class PixelFixGui:
         self._brush_stroke_changed_pixels = 0
         self._brush_stroke_tool_mode = None
 
+    def _canvas_interaction_active(self) -> bool:
+        return (
+            getattr(self, "_brush_stroke_active", False)
+            or getattr(self, "_shape_drag_active", False)
+            or getattr(self, "dragging", False)
+            or getattr(self, "quick_compare_active", False)
+            or getattr(self, "_mouse_button_action_state", None) is not None
+        )
+
     def _reset_shape_preview_state(self) -> None:
         self._shape_drag_active = False
         self._shape_preview_anchor = None
@@ -2214,7 +3080,7 @@ class PixelFixGui:
 
     @staticmethod
     def _is_shape_tool_mode(mode: str | None) -> bool:
-        return mode in {CANVAS_TOOL_MODE_ELLIPSE, CANVAS_TOOL_MODE_RECTANGLE}
+        return mode in {CANVAS_TOOL_MODE_ELLIPSE, CANVAS_TOOL_MODE_RECTANGLE, CANVAS_TOOL_MODE_LINE}
 
     def _brush_tool_mode_active(self) -> bool:
         return self._is_brush_tool_mode(self._canvas_tool_mode_value())
@@ -2230,6 +3096,8 @@ class PixelFixGui:
 
     @staticmethod
     def _shape_tool_display_name(mode: str | None, *, constrained: bool = False) -> str:
+        if mode == CANVAS_TOOL_MODE_LINE:
+            return "Line"
         if mode == CANVAS_TOOL_MODE_ELLIPSE:
             return "Circle" if constrained else "Ellipse"
         return "Square" if constrained else "Rectangle"
@@ -2273,6 +3141,11 @@ class PixelFixGui:
         if anchor is None or current is None:
             return None
         if not getattr(self, "_shape_preview_constrained", False):
+            return current
+        if getattr(self, "_shape_preview_tool_mode", None) not in {
+            CANVAS_TOOL_MODE_ELLIPSE,
+            CANVAS_TOOL_MODE_RECTANGLE,
+        }:
             return current
         return self._constrain_shape_endpoint(anchor, current, image_width=result.width, image_height=result.height)
 
@@ -2463,6 +3336,65 @@ class PixelFixGui:
             return
         self._refresh_action_states()
 
+    def _toggle_line_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_LINE:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Line cancelled.")
+        else:
+            self._start_shape_tool_mode(CANVAS_TOOL_MODE_LINE, action_name="Line")
+            return
+        self._refresh_action_states()
+
+    def _toggle_gradient_mode(self) -> None:
+        if self._current_output_result() is None or self.image_state == "processing":
+            self.process_status_var.set("Create a processed image before using gradient.")
+            return
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_GRADIENT:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Gradient cancelled.")
+        else:
+            self._set_canvas_tool_mode(CANVAS_TOOL_MODE_GRADIENT)
+        self._refresh_action_states()
+
+    def _start_outline_tool_mode(self, mode: str, *, action_name: str) -> None:
+        if self._current_output_result() is None or self.image_state == "processing":
+            self.process_status_var.set(f"Create a processed image before using {action_name.lower()}.")
+            return
+        self._set_canvas_tool_mode(mode)
+        self._refresh_action_states()
+
+    def _toggle_add_outline_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_ADD_OUTLINE:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Add outline cancelled.")
+        else:
+            self._start_outline_tool_mode(CANVAS_TOOL_MODE_ADD_OUTLINE, action_name="Add Outline")
+            return
+        self._refresh_action_states()
+
+    def _toggle_remove_outline_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_REMOVE_OUTLINE:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Remove outline cancelled.")
+        else:
+            self._start_outline_tool_mode(CANVAS_TOOL_MODE_REMOVE_OUTLINE, action_name="Remove Outline")
+            return
+        self._refresh_action_states()
+
+    def _select_outline_colour_mode(self, mode: str) -> None:
+        variable = getattr(self, "outline_colour_mode_var", None)
+        setter = getattr(variable, "set", None)
+        if callable(setter):
+            setter(mode)
+        self._on_outline_colour_mode_changed()
+
+    def _select_outline_remove_brightness_direction(self, direction: str) -> None:
+        variable = getattr(self, "outline_remove_brightness_threshold_direction_var", None)
+        setter = getattr(variable, "set", None)
+        if callable(setter):
+            setter(direction)
+        self._on_outline_remove_brightness_threshold_direction_changed()
+
     def _merge_selected_palette_colors(self) -> None:
         palette = self._editable_palette_labels()
         if not palette:
@@ -2528,33 +3460,53 @@ class PixelFixGui:
             return "processed"
         return None
 
-    def _set_pick_preview(self, label: int | None) -> None:
+    def _sample_visible_preview_label(self, canvas_x: int, canvas_y: int) -> int | None:
+        if getattr(self, "original_display_image", None) is None:
+            return None
+        return self._sample_label_from_preview(canvas_x, canvas_y, view=self._get_effective_view())
+
+    def _set_pick_preview(self, sampled: tuple[int, int, int] | int | None) -> None:
         preview_var = getattr(self, "pick_preview_var", None)
-        preview_frame = getattr(self, "pick_preview_frame", None)
         preview_swatch = getattr(self, "pick_preview_swatch", None)
         if preview_var is None:
             return
-        if label is None:
+        rgb_var = getattr(self, "pick_preview_rgb_var", None)
+        position_var = getattr(self, "pick_preview_position_var", None)
+        if sampled is None:
+            self._pick_preview_sample = None
             preview_var.set("")
-            if preview_frame is not None and hasattr(preview_frame, "pack_forget"):
-                preview_frame.pack_forget()
+            if rgb_var is not None and hasattr(rgb_var, "set"):
+                rgb_var.set("")
+            if position_var is not None and hasattr(position_var, "set"):
+                position_var.set("")
+            self._refresh_pick_preview_widgets()
             return
+        if isinstance(sampled, tuple):
+            image_x, image_y, label = sampled
+        else:
+            image_x = -1
+            image_y = -1
+            label = int(sampled)
+        self._pick_preview_sample = (image_x, image_y, label)
         hex_value = f"#{label:06X}"
         preview_var.set(hex_value)
         if preview_swatch is not None and hasattr(preview_swatch, "configure"):
             preview_swatch.configure(bg=hex_value)
-        if preview_frame is None or not hasattr(preview_frame, "pack"):
-            return
-        manager = preview_frame.winfo_manager() if hasattr(preview_frame, "winfo_manager") else ""
-        if not manager:
-            preview_frame.pack(side=tk.LEFT, padx=(0, 12))
+        if rgb_var is not None and hasattr(rgb_var, "set"):
+            red = (label >> 16) & 0xFF
+            green = (label >> 8) & 0xFF
+            blue = label & 0xFF
+            rgb_var.set(f"RGB {red},{green},{blue}")
+        if position_var is not None and hasattr(position_var, "set"):
+            position_var.set(f"X{image_x} Y{image_y}" if image_x >= 0 and image_y >= 0 else "")
+        self._refresh_pick_preview_widgets()
 
     def _update_pick_preview(self, canvas_x: int, canvas_y: int) -> None:
         pick_view = self._active_pick_view()
         if pick_view is None:
             self._set_pick_preview(None)
             return
-        sampled = self._sample_label_from_preview(canvas_x, canvas_y, view=pick_view)
+        sampled = self._sample_point_from_preview(canvas_x, canvas_y, view=pick_view)
         self._set_pick_preview(sampled)
 
     def _preview_image_coordinates(self, canvas_x: int, canvas_y: int, *, view: str, clamp: bool = False) -> tuple[int, int] | None:
@@ -2653,6 +3605,44 @@ class PixelFixGui:
         self._refresh_output_display_images()
         self.redraw_canvas()
         return changed
+
+    def _start_brush_stroke(self, mode: str, image_x: int, image_y: int) -> None:
+        self._brush_stroke_active = True
+        self._brush_stroke_tool_mode = mode
+        self._brush_stroke_last_point = None
+        self._brush_stroke_changed_pixels = 0
+        self._capture_palette_undo_state()
+        self._record_brush_stroke(image_x, image_y)
+        self.canvas.configure(cursor="crosshair")
+
+    def _drag_active_brush_stroke(self, event: tk.Event) -> bool:
+        if not getattr(self, "_brush_stroke_active", False):
+            return False
+        coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
+        if coordinates is None:
+            return False
+        image_x, image_y = coordinates
+        self._record_brush_stroke(image_x, image_y)
+        return True
+
+    def _finish_active_brush_stroke(self) -> bool:
+        if not getattr(self, "_brush_stroke_active", False):
+            return False
+        changed = int(getattr(self, "_brush_stroke_changed_pixels", 0) or 0)
+        if changed > 0:
+            mode = getattr(self, "_brush_stroke_tool_mode", None)
+            tool_name = self._brush_tool_display_name(mode)
+            self.process_status_var.set(
+                f"{tool_name} changed {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+            )
+            self._refresh_action_states()
+        else:
+            clear_undo = getattr(self, "_clear_palette_undo_state", None)
+            if callable(clear_undo):
+                clear_undo()
+        self._reset_brush_stroke_state()
+        self.canvas.configure(cursor=self._cursor_for_pointer())
+        return True
 
     def _refresh_current_output_display_image(self) -> None:
         current = self._current_output_result()
@@ -2757,6 +3747,16 @@ class PixelFixGui:
                 endpoint_y,
                 outline_label,
                 fill_label=fill_label,
+                width=self._brush_width(),
+            )
+        if preview_mode == CANVAS_TOOL_MODE_LINE:
+            return apply_line_operation(
+                current,
+                anchor_x,
+                anchor_y,
+                endpoint_x,
+                endpoint_y,
+                outline_label,
                 width=self._brush_width(),
             )
         return None, 0
@@ -2869,6 +3869,8 @@ class PixelFixGui:
         self._set_tool_button_enabled("eraser_button", can_erase)
         self._set_tool_button_enabled("circle_button", can_draw)
         self._set_tool_button_enabled("square_button", can_draw)
+        self._set_tool_button_enabled("line_button", can_draw)
+        self._set_tool_button_enabled("gradient_button", can_erase)
         spinbox = getattr(self, "brush_width_spinbox", None)
         if spinbox is not None and hasattr(spinbox, "configure"):
             spinbox.configure(state="normal" if can_erase else "disabled")
@@ -2883,31 +3885,50 @@ class PixelFixGui:
         has_output = self._current_output_result() is not None if hasattr(self, "_current_output_result") else False
         mode_state = tk.NORMAL if has_output and not busy else tk.DISABLED
         adaptive_state = "normal" if adaptive and has_output and not busy else "disabled"
-        remove_threshold_toggle_state = tk.NORMAL if has_output and not busy else tk.DISABLED
         remove_threshold_state = "normal" if remove_threshold and has_output and not busy else "disabled"
-        for widget_name in ("outline_palette_mode_button", "outline_adaptive_mode_button"):
+        pixel_perfect_toggle = getattr(self, "outline_pixel_perfect_toggle", None)
+        if pixel_perfect_toggle is not None and hasattr(pixel_perfect_toggle, "configure"):
+            pixel_perfect_toggle.configure(state=mode_state)
+        for widget_name in (
+            "outline_colour_mode_dropdown_button",
+            "outline_palette_mode_button",
+            "outline_adaptive_mode_button",
+        ):
             widget = getattr(self, widget_name, None)
             if widget is not None and hasattr(widget, "configure"):
                 widget.configure(state=mode_state)
         toggle = getattr(self, "outline_add_generated_colours_toggle", None)
         if toggle is not None and hasattr(toggle, "configure"):
             toggle.configure(state=tk.NORMAL if adaptive and has_output and not busy else tk.DISABLED)
+        label = getattr(self, "outline_adaptive_darken_label", None)
+        if label is not None and hasattr(label, "configure"):
+            label.configure(state=tk.NORMAL if adaptive and has_output and not busy else tk.DISABLED)
         spinbox = getattr(self, "outline_adaptive_darken_spinbox", None)
         if spinbox is not None and hasattr(spinbox, "configure"):
             spinbox.configure(state=adaptive_state)
         remove_toggle = getattr(self, "outline_remove_brightness_threshold_toggle", None)
         if remove_toggle is not None and hasattr(remove_toggle, "configure"):
-            remove_toggle.configure(state=remove_threshold_toggle_state)
+            remove_toggle.configure(state=mode_state)
         remove_spinbox = getattr(self, "outline_remove_brightness_threshold_spinbox", None)
         if remove_spinbox is not None and hasattr(remove_spinbox, "configure"):
             remove_spinbox.configure(state=remove_threshold_state)
         for widget_name in (
+            "outline_remove_brightness_direction_dropdown_button",
             "outline_remove_brightness_direction_dark_button",
             "outline_remove_brightness_direction_bright_button",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None and hasattr(widget, "configure"):
                 widget.configure(state=remove_threshold_state)
+        apply_button = getattr(self, "options_apply_button", None)
+        if apply_button is not None and hasattr(apply_button, "configure"):
+            apply_enabled = False
+            mode = self._options_tool_mode()
+            if mode == CANVAS_TOOL_MODE_ADD_OUTLINE:
+                apply_enabled = self._can_apply_add_outline_tool()
+            elif mode == CANVAS_TOOL_MODE_REMOVE_OUTLINE:
+                apply_enabled = self._can_apply_remove_outline_tool()
+            apply_button.configure(state=tk.NORMAL if apply_enabled else tk.DISABLED)
 
     def _on_brush_width_changed(self, _event: tk.Event | None = None) -> None:
         width = self._brush_width()
@@ -2954,6 +3975,7 @@ class PixelFixGui:
                 return
         pixel_perfect = self._outline_pixel_perfect_enabled()
         darken_percent = self._outline_adaptive_darken_percent()
+        width = self._brush_width()
         updated, changed, generated_labels = add_exterior_outline(
             current,
             outline_label if outline_label is not None else 0,
@@ -2961,6 +3983,7 @@ class PixelFixGui:
             pixel_perfect=pixel_perfect,
             adaptive=adaptive,
             adaptive_darken_percent=darken_percent,
+            width=width,
             workspace=getattr(self, "workspace", None),
         )
         if changed <= 0:
@@ -3034,6 +4057,7 @@ class PixelFixGui:
         brightness_threshold_enabled = self._outline_remove_brightness_threshold_enabled()
         brightness_threshold_percent = self._outline_remove_brightness_threshold_percent()
         brightness_threshold_direction = self._outline_remove_brightness_threshold_direction()
+        width = self._brush_width()
         updated, changed = remove_exterior_outline(
             current,
             transparent_labels=getattr(self, "transparent_colors", set()),
@@ -3041,6 +4065,7 @@ class PixelFixGui:
             brightness_threshold_enabled=brightness_threshold_enabled,
             brightness_threshold_percent=brightness_threshold_percent,
             brightness_threshold_direction=brightness_threshold_direction,
+            width=width,
             workspace=getattr(self, "workspace", None),
         )
         if changed <= 0:
@@ -3438,15 +4463,71 @@ class PixelFixGui:
             return image
         alpha_mask = result.alpha_mask
         transparent = getattr(self, "transparent_colors", set()) if transparent_colors_override is None else transparent_colors_override
+        display_adjustments = self._output_display_label_adjustments(result)
         data: list[tuple[int, int, int, int]] = []
         for y, row in enumerate(result.grid):
             for x, (red, green, blue) in enumerate(row):
                 label = (red << 16) | (green << 8) | blue
+                adjusted_label = display_adjustments.get(label, label)
+                red = (adjusted_label >> 16) & 0xFF
+                green = (adjusted_label >> 8) & 0xFF
+                blue = adjusted_label & 0xFF
                 is_visible = True if alpha_mask is None else bool(alpha_mask[y][x])
                 alpha = 0 if (not is_visible or label in transparent) else 255
                 data.append((red, green, blue, alpha))
         image.putdata(data)
         return image
+
+    def _output_display_label_adjustments(self, result: ProcessResult | None) -> dict[int, int]:
+        if result is None:
+            return {}
+        adjustments = self._palette_adjustments()
+        if adjustments.is_neutral():
+            return {}
+        label_order: list[int] = []
+        seen_labels: set[int] = set()
+        for row in result.grid:
+            for red, green, blue in row:
+                label = (red << 16) | (green << 8) | blue
+                if label in seen_labels:
+                    continue
+                seen_labels.add(label)
+                label_order.append(label)
+        if not label_order:
+            return {}
+        selected_indices = self._output_display_adjustment_indices(label_order)
+        adjusted_labels = adjust_palette_labels(
+            label_order,
+            adjustments,
+            workspace=getattr(self, "workspace", None),
+            selected_indices=selected_indices,
+        )
+        return {
+            original: adjusted
+            for original, adjusted in zip(label_order, adjusted_labels, strict=False)
+            if adjusted != original
+        }
+
+    def _output_display_adjustment_indices(self, labels: list[int]) -> set[int] | None:
+        selected_palette_indices = self._palette_adjustment_selection_indices()
+        if not selected_palette_indices:
+            return None
+        palette_labels, _source = self._current_palette_source_labels()
+        if not palette_labels:
+            return None
+        selected_labels = {
+            palette_labels[index]
+            for index in selected_palette_indices
+            if 0 <= index < len(palette_labels)
+        }
+        if not selected_labels:
+            return None
+        matching_indices = {
+            index
+            for index, label in enumerate(labels)
+            if label in selected_labels
+        }
+        return matching_indices or None
 
     def _refresh_output_display_images(self) -> None:
         self.downsample_display_image = self._build_output_display_image(getattr(self, "downsample_result", None))
@@ -3677,9 +4758,10 @@ class PixelFixGui:
         return max(1, min(target, unique_count))
 
     def _on_canvas_press(self, event: tk.Event) -> None:
+        if getattr(self, "_mouse_button_action_state", None) is not None:
+            return
         mode = self._canvas_tool_mode_value()
         if getattr(self, "original_display_image", None) is None and mode is None:
-            self.open_image()
             return
         if mode == CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK:
             sampled = self._sample_label_from_preview(event.x, event.y, view="processed")
@@ -3714,13 +4796,7 @@ class PixelFixGui:
             if coordinates is None:
                 return
             image_x, image_y = coordinates
-            self._brush_stroke_active = True
-            self._brush_stroke_tool_mode = mode
-            self._brush_stroke_last_point = None
-            self._brush_stroke_changed_pixels = 0
-            self._capture_palette_undo_state()
-            self._record_brush_stroke(image_x, image_y)
-            self.canvas.configure(cursor="crosshair")
+            self._start_brush_stroke(mode, image_x, image_y)
             return
         if self._is_shape_tool_mode(mode):
             coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
@@ -3744,11 +4820,7 @@ class PixelFixGui:
 
     def _on_canvas_drag(self, event: tk.Event) -> None:
         if getattr(self, "_brush_stroke_active", False) and self._is_brush_tool_mode(getattr(self, "_brush_stroke_tool_mode", None)):
-            coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
-            if coordinates is None:
-                return
-            image_x, image_y = coordinates
-            self._record_brush_stroke(image_x, image_y)
+            self._drag_active_brush_stroke(event)
             return
         if getattr(self, "_shape_drag_active", False) and self._is_shape_tool_mode(getattr(self, "_shape_preview_tool_mode", None)):
             coordinates = self._preview_image_coordinates(event.x, event.y, view="processed", clamp=True)
@@ -3770,20 +4842,7 @@ class PixelFixGui:
 
     def _on_canvas_release(self, event: tk.Event) -> None:
         if getattr(self, "_brush_stroke_active", False):
-            changed = int(getattr(self, "_brush_stroke_changed_pixels", 0) or 0)
-            if changed > 0:
-                mode = getattr(self, "_brush_stroke_tool_mode", None)
-                tool_name = self._brush_tool_display_name(mode)
-                self.process_status_var.set(
-                    f"{tool_name} changed {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
-                )
-                self._refresh_action_states()
-            else:
-                clear_undo = getattr(self, "_clear_palette_undo_state", None)
-                if callable(clear_undo):
-                    clear_undo()
-            self._reset_brush_stroke_state()
-            self.canvas.configure(cursor=self._cursor_for_pointer())
+            self._finish_active_brush_stroke()
             return
         if getattr(self, "_shape_drag_active", False):
             if hasattr(event, "x") and hasattr(event, "y"):
@@ -3815,12 +4874,13 @@ class PixelFixGui:
         self.canvas.configure(cursor=self._cursor_for_pointer())
 
     def _on_canvas_motion(self, event: tk.Event) -> None:
+        mode = self._canvas_tool_mode_value()
         if self.dragging:
             self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
-        elif self._active_pick_view() is not None:
+        elif mode == CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK:
             self.canvas.configure(cursor="crosshair")
             self._update_pick_preview(event.x, event.y)
-        elif self._canvas_tool_mode_value() is not None:
+        elif self._is_crosshair_tool_mode(mode):
             self._set_pick_preview(None)
             self.canvas.configure(cursor="crosshair")
         else:
@@ -3829,23 +4889,80 @@ class PixelFixGui:
 
     def _on_canvas_leave(self, _event: tk.Event) -> None:
         self._set_pick_preview(None)
-        if not self.dragging:
+        if not self.dragging and not getattr(self, "_brush_stroke_active", False):
             self.canvas.configure(cursor="")
 
-    def _on_quick_compare_press(self, _event: tk.Event) -> None:
-        if self.view_var.get() != "processed" or self._current_output_image() is None:
-            return
+    def _start_quick_compare(self) -> bool:
+        if (
+            self.view_var.get() != "processed"
+            or self._current_output_image() is None
+            or getattr(self, "_brush_stroke_active", False)
+            or getattr(self, "_shape_drag_active", False)
+            or getattr(self, "dragging", False)
+        ):
+            return False
         self.quick_compare_active = True
         self.redraw_canvas()
+        return True
 
-    def _on_quick_compare_release(self, _event: tk.Event) -> None:
+    def _stop_quick_compare(self) -> bool:
         if not self.quick_compare_active:
-            return
+            return False
         self.quick_compare_active = False
         self.redraw_canvas()
+        return True
+
+    def _on_quick_compare_press(self, _event: tk.Event) -> None:
+        self._start_quick_compare()
+
+    def _on_quick_compare_release(self, _event: tk.Event) -> None:
+        self._stop_quick_compare()
+
+    def _on_canvas_assigned_button_press(self, event: tk.Event, button: int) -> None:
+        if self._canvas_interaction_active():
+            return
+        action = self._mouse_button_action(button)
+        if action == MOUSE_BUTTON_ACTION_VIEW_ORIGINAL:
+            if self._start_quick_compare():
+                self._mouse_button_action_state = CanvasMouseActionState(button, action)
+            return
+        if action == MOUSE_BUTTON_ACTION_SAMPLE_COLOR:
+            sampled = self._sample_visible_preview_label(event.x, event.y)
+            if sampled is not None:
+                self._assign_palette_color_to_slot(self._active_color_slot_value(), sampled)
+            return
+        if action == MOUSE_BUTTON_ACTION_SWAP_COLORS:
+            self._swap_active_colors()
+            return
+        if action != MOUSE_BUTTON_ACTION_ERASER:
+            return
+        if self._get_effective_view() != "processed" or self._current_output_result() is None:
+            return
+        coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
+        if coordinates is None:
+            return
+        image_x, image_y = coordinates
+        self._mouse_button_action_state = CanvasMouseActionState(button, action)
+        self._start_brush_stroke(CANVAS_TOOL_MODE_ERASER, image_x, image_y)
+
+    def _on_canvas_assigned_button_drag(self, event: tk.Event, button: int) -> None:
+        state = getattr(self, "_mouse_button_action_state", None)
+        if state is None or state.button != button or state.action != MOUSE_BUTTON_ACTION_ERASER:
+            return
+        self._drag_active_brush_stroke(event)
+
+    def _on_canvas_assigned_button_release(self, _event: tk.Event, button: int) -> None:
+        state = getattr(self, "_mouse_button_action_state", None)
+        if state is None or state.button != button:
+            return
+        self._mouse_button_action_state = None
+        if state.action == MOUSE_BUTTON_ACTION_VIEW_ORIGINAL:
+            self._stop_quick_compare()
+        elif state.action == MOUSE_BUTTON_ACTION_ERASER:
+            self._finish_active_brush_stroke()
 
     def _cursor_for_pointer(self) -> str:
-        if self._canvas_tool_mode_value() is not None:
+        if self._is_crosshair_tool_mode(self._canvas_tool_mode_value()):
             return "crosshair"
         return OPEN_HAND_CURSOR if self._point_is_over_image() else ""
 
@@ -4116,6 +5233,7 @@ class PixelFixGui:
         scrollbar_width = scrollbar.winfo_width() if scrollbar is not None and scrollbar.winfo_ismapped() else 0
         available_width = max(PALETTE_SWATCH_SIZE, self.palette_canvas.winfo_width() - scrollbar_width)
         columns = max(1, available_width // PALETTE_SWATCH_SIZE)
+        fill_inset = max(0, (PALETTE_SWATCH_SIZE - PALETTE_SWATCH_COLOUR_SIZE) // 2)
         for index, colour in enumerate(displayed):
             row = index // columns
             col = index % columns
@@ -4124,14 +5242,13 @@ class PixelFixGui:
             x1 = x0 + PALETTE_SWATCH_SIZE - 1
             y1 = y0 + PALETTE_SWATCH_SIZE - 1
             selected = index in display_selection
-            border_width = 2 if selected else 1
             border_colour = APP_ACCENT if selected else APP_BG
             self.palette_canvas.create_rectangle(x0, y0, x1, y1, fill=border_colour, outline="")
             self.palette_canvas.create_rectangle(
-                x0 + border_width,
-                y0 + border_width,
-                x1 - border_width,
-                y1 - border_width,
+                x0 + fill_inset,
+                y0 + fill_inset,
+                x0 + fill_inset + PALETTE_SWATCH_COLOUR_SIZE - 1,
+                y0 + fill_inset + PALETTE_SWATCH_COLOUR_SIZE - 1,
                 fill=f"#{colour:06x}",
                 outline="",
             )
@@ -4143,11 +5260,6 @@ class PixelFixGui:
         palette, source = self._current_palette_source_labels()
         if not palette:
             return ([], "none")
-        if self._palette_adjustments().is_neutral():
-            return palette, source
-        adjusted_palette = self._current_adjusted_structured_palette()
-        if adjusted_palette is not None:
-            return adjusted_palette.labels(), self._adjusted_palette_source_label(adjusted_palette)
         return palette, source
 
     def _update_image_info(self) -> None:
@@ -4269,19 +5381,21 @@ class PixelFixGui:
             return
         elif palette_adjustment_changed:
             self._clear_palette_undo_state()
-            if self._has_palette_source():
+            self._refresh_output_display_images()
+            if self._current_output_result() is not None:
                 if self._palette_adjustment_selection_indices():
-                    message = message or "Selected palette colours changed. Click Apply Palette to update the preview."
+                    self.process_status_var.set("Selected image colours updated.")
                 else:
-                    message = message or "Palette adjustments changed. Click Apply Palette to update the preview."
+                    self.process_status_var.set("Image adjustment settings updated.")
             else:
-                self.process_status_var.set("Palette adjustment settings updated.")
-                self._update_palette_adjustment_labels()
-                self._update_palette_strip()
-                self.redraw_canvas()
-                self._schedule_state_persist()
-                self._refresh_action_states()
-                return
+                self.process_status_var.set("Image adjustment settings updated.")
+            self._update_palette_adjustment_labels()
+            self._update_scale_info()
+            self._update_palette_strip()
+            self.redraw_canvas()
+            self._schedule_state_persist()
+            self._refresh_action_states()
+            return
         elif palette_apply_changed:
             self._clear_palette_undo_state()
             message = message or "Palette settings changed. Click Apply Palette to update the preview."
@@ -4375,11 +5489,14 @@ class PixelFixGui:
             ("invert_palette_selection_button", has_palette_source and not busy),
             ("remove_palette_color_button", has_palette_source and has_palette_selection and not busy),
         ):
+            if widget_name in getattr(self, "_palette_action_button_assets", {}):
+                self._set_palette_action_button_enabled(widget_name, enabled)
+                continue
             widget = getattr(self, widget_name, None)
             if widget is not None and hasattr(widget, "configure"):
                 widget.configure(state=tk.NORMAL if enabled else tk.DISABLED)
         self._set_tool_button_enabled("palette_picker_button", has_output and not busy)
-        self._set_tool_button_enabled("add_outline_button", has_output and not busy and (adaptive_outline or has_single_palette_selection))
+        self._set_tool_button_enabled("add_outline_button", has_output and not busy)
         self._set_tool_button_enabled("remove_outline_button", has_output and not busy)
         self._set_tool_button_enabled("undo_button", can_undo and not busy)
         self._set_tool_button_enabled("redo_button", can_redo and not busy)
@@ -4395,7 +5512,7 @@ class PixelFixGui:
             palette_reduction_spinbox.configure(
                 state="normal" if has_image and not busy and not is_structured_quantizer(self._current_quantizer_value()) else "disabled"
             )
-        adjustment_state = tk.NORMAL if has_palette_source and not busy else tk.DISABLED
+        adjustment_state = tk.NORMAL if has_output and not busy else tk.DISABLED
         for control in getattr(self, "palette_adjustment_controls", []):
             control.configure(state=adjustment_state)
         self._menu_items["view"].entryconfigure("Processed", state=tk.NORMAL if has_output else tk.DISABLED)
@@ -4424,8 +5541,14 @@ class PixelFixGui:
         self._menu_items["preferences"].entryconfigure("Colour Ramp", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Dithering Method", state=tk.NORMAL if not busy else tk.DISABLED)
         self._menu_items["preferences"].entryconfigure("Selection Threshold", state=tk.NORMAL if not busy else tk.DISABLED)
+        self._menu_items["preferences"].entryconfigure("Mouse Buttons", state=tk.NORMAL if not busy else tk.DISABLED)
+        preferences_mouse_buttons = self._menu_items.get("preferences_mouse_buttons")
+        if preferences_mouse_buttons is not None:
+            preferences_mouse_buttons.entryconfigure("Right Mouse Button", state=tk.NORMAL if not busy else tk.DISABLED)
+            preferences_mouse_buttons.entryconfigure("Middle Mouse Button", state=tk.NORMAL if not busy else tk.DISABLED)
         self._refresh_brush_control_states()
         self._refresh_outline_control_states()
+        self._refresh_tool_options_panel()
         self._refresh_tool_button_styles()
 
     def _refresh_tool_button_styles(self) -> None:
@@ -4439,7 +5562,11 @@ class PixelFixGui:
             "eraser_button": tool_mode == CANVAS_TOOL_MODE_ERASER,
             "circle_button": tool_mode == CANVAS_TOOL_MODE_ELLIPSE,
             "square_button": tool_mode == CANVAS_TOOL_MODE_RECTANGLE,
+            "line_button": tool_mode == CANVAS_TOOL_MODE_LINE,
+            "gradient_button": tool_mode == CANVAS_TOOL_MODE_GRADIENT,
             "palette_picker_button": tool_mode == CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK,
+            "add_outline_button": tool_mode == CANVAS_TOOL_MODE_ADD_OUTLINE,
+            "remove_outline_button": tool_mode == CANVAS_TOOL_MODE_REMOVE_OUTLINE,
             "view_original_button": current_view == "original",
             "view_processed_button": current_view == "processed",
         }
@@ -4473,13 +5600,18 @@ class PixelFixGui:
         self._schedule_state_persist()
 
     def _on_outline_pixel_perfect_changed(self) -> None:
+        self._refresh_tool_options_panel()
         self._schedule_state_persist()
 
     def _on_outline_colour_mode_changed(self) -> None:
         mode = self._outline_colour_mode()
         if getattr(self, "outline_colour_mode_var", None) is not None and self.outline_colour_mode_var.get() != mode:
             self.outline_colour_mode_var.set(mode)
+        display_var = getattr(self, "outline_colour_mode_display_var", None)
+        if display_var is not None and hasattr(display_var, "set"):
+            display_var.set(OUTLINE_COLOUR_MODE_LABELS[mode])
         self._refresh_outline_control_states()
+        self._refresh_tool_options_panel()
         self._schedule_state_persist()
         self._refresh_action_states()
 
@@ -4494,6 +5626,7 @@ class PixelFixGui:
 
     def _on_outline_remove_brightness_threshold_enabled_changed(self) -> None:
         self._refresh_outline_control_states()
+        self._refresh_tool_options_panel()
         self._schedule_state_persist()
 
     def _on_outline_remove_brightness_threshold_percent_changed(self, _event: tk.Event | None = None) -> None:
@@ -4512,6 +5645,10 @@ class PixelFixGui:
         setter = getattr(variable, "set", None)
         if variable is not None and callable(getter) and callable(setter) and getter() != direction:
             setter(direction)
+        display_var = getattr(self, "outline_remove_brightness_direction_display_var", None)
+        if display_var is not None and hasattr(display_var, "set"):
+            display_var.set(OUTLINE_REMOVE_DIRECTION_LABELS[direction])
+        self._refresh_tool_options_panel()
         self._schedule_state_persist()
 
     def _schedule_state_persist(self) -> None:
@@ -4542,10 +5679,14 @@ class PixelFixGui:
                 "brush_width": self._brush_width(),
                 "brush_shape": self._brush_shape(),
                 "view_mode": self.view_var.get(),
+                "right_mouse_action": self._mouse_button_action(CANVAS_MOUSE_BUTTON_RIGHT),
+                "middle_mouse_action": self._mouse_button_action(CANVAS_MOUSE_BUTTON_MIDDLE),
                 "primary_color_label": self._slot_color_label(ACTIVE_COLOR_SLOT_PRIMARY),
                 "secondary_color_label": self._slot_color_label(ACTIVE_COLOR_SLOT_SECONDARY),
                 "transparent_color_slot": self._transparent_color_slot_value(),
                 "active_color_slot": self._active_color_slot_value(),
+                "active_palette_source": self.active_palette_source,
+                "active_palette_path": self.active_palette_path,
                 "recent_files": self.recent_files,
             }
         )

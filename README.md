@@ -11,7 +11,7 @@ The current app is a Windows-friendly Tkinter GUI built around a simple staged w
 1. Determine pixel scale
 2. Downsample
 3. Apply palette
-4. Adjust palette
+4. Adjust image colours
 
 The GUI is the main product, and the CLI now reuses the same non-interactive processing stack for headless and batch work.
 
@@ -58,7 +58,7 @@ From one interface, you can:
   - `RotSprite`
 - Build palettes in several ways:
   - generate a reduced palette with `Median Cut` or `K-Means Clustering`
-  - load built-in `.gpl` palettes from the repository
+  - browse built-in `.gpl` palettes from a compact searchable popover under the swatches
   - load external `.gpl` or legacy `.json` palettes
 - Edit the current palette directly:
   - add colours from the original image
@@ -72,18 +72,24 @@ From one interface, you can:
   - `All` / `None` buttons
   - `Select` menu commands based on lightness, saturation, chroma, temperature, hue buckets, and near-duplicate similarity
   - `Selection Threshold` preference from `10%` to `100%`
-- Adjust the whole palette or just the selected swatches with:
+- Adjust the processed image preview with:
   - `Brightness`
   - `Contrast`
   - `Hue`
   - `Saturation`
+- Optionally limit those image adjustments to colours used by the selected swatches.
 - Apply the current palette only when you click `Apply Palette`.
 - Remove connected regions to transparency with the processed-image transparency picker.
+- Sample the processed image with `Eyedropper`, including a live hover preview in the options panel.
 - Draw directly into the current processed output with `Pencil` using one selected palette colour, adjustable width, and `Square` or `Round` brush shapes.
 - Erase pixels back to transparency with `Eraser` using the same width and shape controls.
-- Add a 1-pixel exterior outline around the current processed silhouette using one selected palette colour.
-- Remove a 1-pixel exterior outline by eroding the outside edge to transparency, with an optional perceptual brightness threshold.
+- Draw straight segments with `Line`, using the shared width control.
+- Draw `Ellipse` and `Rectangle` outlines with the shared width control.
+- `Gradient` is present in the toolbar as a placeholder for future work.
+- Add a multi-pixel exterior outline around the current processed silhouette using one selected palette colour or adaptive outline generation.
+- Remove a multi-pixel exterior outline by eroding the outside edge to transparency, with an optional perceptual brightness threshold.
 - Toggle `Pixel Perfect` on the outline tools to bevel hard corners and avoid doubled edge pixels, or turn it off for square-corner behavior.
+- Assign the right and middle mouse buttons to quick actions such as `View Original`, `Sample Color`, `Swap Colors`, or temporary `Eraser`.
 - Use dithering when applying palettes:
   - `None`
   - `Ordered (Bayer)`
@@ -99,15 +105,17 @@ From one interface, you can:
 4. Build or load a palette:
    - click `Generate Reduced Palette`
    - load a built-in or external palette
-5. Optionally sort, select, merge, ramp, add, remove, or adjust palette colours.
+5. Optionally sort, select, merge, ramp, add, or remove palette colours.
 6. Click `Apply Palette`.
-7. Optionally use `Make Transparent`, `Pencil`, `Eraser`, `Add Outline`, or `Remove Outline` on the processed result.
-8. Compare the result against the original, then save the image or palette.
+7. Optionally use `Brightness`, `Contrast`, `Hue`, or `Saturation` to adjust the processed image preview.
+8. Optionally use `Make Transparent`, `Eyedropper`, `Pencil`, `Eraser`, `Line`, `Ellipse`, `Rectangle`, `Add Outline`, or `Remove Outline` on the processed result.
+9. Compare the result against the original, then save the image or palette.
 
 Important behavior:
 
-- palette generation, palette sorting, palette selection, and palette adjustments update the `Current palette` preview immediately
-- the processed image does not change until you click `Apply Palette`
+- palette generation, palette sorting, and palette selection update the `Current palette` preview immediately
+- `Brightness`, `Contrast`, `Hue`, and `Saturation` recolour the processed image preview without changing the palette swatches
+- palette edits still update the processed image only when you click `Apply Palette`
 
 ## Current GUI Layout
 
@@ -153,18 +161,19 @@ The `Current palette` strip is live and editable before apply:
 - `Ramp` appends a full ramp for each selected swatch using the current ramp settings
 - `All` selects every swatch
 - `None` clears selection
+- the built-in palette browser button opens a searchable popover with grouped categories, hover preview, and click-to-apply selection
 
 Selection-aware editing is built in:
 
-- if no swatches are selected, palette adjustments affect the full current palette
-- if swatches are selected, palette adjustments only affect that subset
+- if no swatches are selected, image adjustments affect all colours in the processed image preview
+- if swatches are selected, image adjustments only affect pixels using that subset of colours
 
 #### Palette menu tools
 
 The `Palette` menu currently includes:
 
 - input and output colour-mode controls
-- built-in palette browser
+- built-in palette menu access
 - add-colour tools
 - sort current palette
 - load palette
@@ -197,6 +206,9 @@ After a processed image exists, you can:
 
 - `Make Transparent`
   - click the processed image to remove only the connected region under the cursor
+- `Eyedropper`
+  - shows a live swatch, hex value, RGB value, and image coordinates in the options panel while hovering
+  - click once to sample the hovered processed colour into the active colour slot
 - `Pencil`
   - draws into the current output image, not the original source
   - requires exactly one selected swatch in the current palette
@@ -207,31 +219,42 @@ After a processed image exists, you can:
   - erases pixels from the current output image to transparency
   - uses the same `Width` and `Square` / `Round` brush controls as `Pencil`
   - click and drag to erase continuous strokes without gaps
+- `Line`
+  - draws a straight segment with the active primary colour
+  - uses the shared `Width` control
+- `Ellipse` and `Rectangle`
+  - draw shape outlines using the active primary colour
+  - use the shared `Width` control
+- `Gradient`
+  - currently a toolbar placeholder only
 - `Add Outline`
-  - `Outline Colour` mode supports `Selected Palette` or `Adaptive`
-  - `Selected Palette` requires exactly one selected swatch in the current palette
+  - `Outline Colour` mode supports `Selected` or `Adaptive`
+  - `Selected` requires exactly one selected swatch in the current palette
   - `Adaptive` samples adjacent interior pixels, darkens the dominant interior colour, and can optionally add unique generated outline colours to the current palette
   - adaptive darkening defaults to `60%`
-  - adds a 1-pixel outline around the outside silhouette only
+  - uses the shared `Width` control for multi-pass outlines
   - defaults to `Pixel Perfect`, which chamfers hard corners to avoid doubled edges
+  - opens its options first and applies only when you click `Apply`
 - `Remove Outline`
   - removes the outer inside edge of the current silhouette by making it transparent
   - optional `Brightness Threshold` can limit removal to only dark or bright candidate edge pixels
   - the threshold uses perceptual lightness from `0%` to `100%`
+  - uses the shared `Width` control for multi-pass removal
   - defaults to `Pixel Perfect`, which removes the cleaned edge mask instead of the full square ring
+  - opens its options first and applies only when you click `Apply`
 
 These tools work through the processed image's per-pixel alpha mask, so saved PNGs preserve the transparency.
 
-### 4. Adjust palette
+### 4. Adjust image colours
 
-The adjustment stage uses perceptual palette operations from [`src/pixel_fix/palette/adjust.py`](src/pixel_fix/palette/adjust.py):
+The adjustment stage uses perceptual colour operations from [`src/pixel_fix/palette/adjust.py`](src/pixel_fix/palette/adjust.py):
 
 - `Brightness`
 - `Contrast`
 - `Hue`
 - `Saturation`
 
-These adjustments modify the current palette preview first. The image only updates when you click `Apply Palette`.
+These adjustments recolour the processed image preview directly. The palette swatches stay on the source palette, and selected swatches can be used as a mask to limit which image colours are affected.
 
 ## Preferences
 
@@ -245,6 +268,7 @@ The current `Preferences` menu includes:
   - ramp contrast
 - dithering method
 - selection threshold
+- mouse button assignments for right and middle click
 
 ## Shortcuts
 

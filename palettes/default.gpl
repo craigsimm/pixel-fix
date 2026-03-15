@@ -1,0 +1,132 @@
+GIMP Palette
+Name: pixel-fix-128
+Columns: 16
+# 128-colour default palette for pixel art
+  6   7  10	neutral_00
+ 12  13  18	neutral_01
+ 18  20  28	neutral_02
+ 26  29  38	neutral_03
+ 35  39  50	neutral_04
+ 46  51  64	neutral_05
+ 58  64  79	neutral_06
+ 73  80  97	neutral_07
+ 92 100 119	neutral_08
+113 122 141	neutral_09
+136 145 164	neutral_10
+161 170 187	neutral_11
+188 196 210	neutral_12
+214 220 231	neutral_13
+236 240 246	neutral_14
+250 251 253	neutral_15
+ 26  16  12	brown_00
+ 59  37  26	brown_01
+ 91  58  40	brown_02
+124  79  54	brown_03
+161 118  88	brown_04
+199 157 122	brown_05
+236 196 156	brown_06
+ 36  16  12	peach_00
+ 80  47  36	peach_01
+124  77  60	peach_02
+168 108  84	peach_03
+195 144 119	peach_04
+221 180 153	peach_05
+248 216 188	peach_06
+ 26   5  10	red_00
+ 76  15  25	red_01
+126  26  41	red_02
+176  36  56	red_03
+202  86 100	red_04
+229 136 144	red_05
+255 186 188	red_06
+ 36   8   6	scarlet_00
+ 94  25  15	scarlet_01
+152  41  25	scarlet_02
+210  58  34	scarlet_03
+225  99  63	scarlet_04
+240 141  93	scarlet_05
+255 182 122	scarlet_06
+ 34  12   4	orange_00
+ 94  37  12	orange_01
+154  63  20	orange_02
+214  88  28	orange_03
+228 124  56	orange_04
+241 160  84	orange_05
+255 196 112	orange_06
+ 38  22   4	amber_00
+ 91  56  10	amber_01
+145  90  16	amber_02
+198 124  22	amber_03
+217 156  55	amber_04
+236 188  87	amber_05
+255 220 120	amber_06
+ 34  28   6	yellow_00
+ 85  75  12	yellow_01
+135 121  18	yellow_02
+186 168  24	yellow_03
+209 193  65	yellow_04
+232 219 105	yellow_05
+255 244 146	yellow_06
+ 20  30   8	lime_00
+ 55  77  14	lime_01
+ 89 123  20	lime_02
+124 170  26	lime_03
+156 196  61	lime_04
+188 222  97	lime_05
+220 248 132	lime_06
+  8  26  14	green_00
+ 21  67  30	green_01
+ 35 109  46	green_02
+ 48 150  62	green_03
+ 93 182  98	green_04
+137 214 134	green_05
+182 246 170	green_06
+  6  24  20	emerald_00
+ 13  67  50	emerald_01
+ 21 111  80	emerald_02
+ 28 154 110	emerald_03
+ 68 184 139	emerald_04
+108 214 167	emerald_05
+148 244 196	emerald_06
+  6  24  28	teal_00
+ 12  60  61	teal_01
+ 18  96  93	teal_02
+ 24 132 126	teal_03
+ 66 165 155	teal_04
+108 197 185	teal_05
+150 230 214	teal_06
+  6  22  36	cyan_00
+ 12  56  82	cyan_01
+ 18  90 128	cyan_02
+ 24 124 174	cyan_03
+ 66 157 201	cyan_04
+108 191 228	cyan_05
+150 224 255	cyan_06
+  8  18  42	sky_00
+ 23  51  98	sky_01
+ 39  85 154	sky_02
+ 54 118 210	sky_03
+ 93 151 225	sky_04
+133 183 240	sky_05
+172 216 255	sky_06
+  8  14  40	blue_00
+ 19  37  91	blue_01
+ 31  59 141	blue_02
+ 42  82 192	blue_03
+ 78 115 213	blue_04
+114 147 234	blue_05
+150 180 255	blue_06
+ 14  10  40	indigo_00
+ 35  28  87	indigo_01
+ 55  46 135	indigo_02
+ 76  64 182	indigo_03
+111  99 206	indigo_04
+147 135 231	indigo_05
+182 170 255	indigo_06
+ 24   8  34	violet_00
+ 62  26  85	violet_01
+100  44 137	violet_02
+138  62 188	violet_03
+171 101 210	violet_04
+203 141 233	violet_05
+236 180 255	violet_06
