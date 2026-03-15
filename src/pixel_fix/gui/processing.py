@@ -194,6 +194,29 @@ def apply_ellipse_operation(
     )
 
 
+def apply_line_operation(
+    result: ProcessResult,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    outline_label: int,
+    *,
+    width: int = BRUSH_WIDTH_DEFAULT,
+) -> tuple[ProcessResult, int]:
+    return _apply_shape_operation(
+        result,
+        "line",
+        x0,
+        y0,
+        x1,
+        y1,
+        outline_label=outline_label,
+        fill_label=None,
+        width=width,
+    )
+
+
 def brush_footprint(width: int = BRUSH_WIDTH_DEFAULT, shape: str = BRUSH_SHAPE_SQUARE) -> set[tuple[int, int]]:
     return set(_brush_footprint_offsets(width, shape))
 
@@ -270,7 +293,42 @@ def add_exterior_outline(
     pixel_perfect: bool = True,
     adaptive: bool = False,
     adaptive_darken_percent: int = 60,
+    width: int = BRUSH_WIDTH_DEFAULT,
     workspace: ColorWorkspace | None = None,
+) -> tuple[ProcessResult, int, tuple[int, ...]]:
+    normalized_width = _coerce_brush_width(width)
+    current = result
+    total_changed = 0
+    generated_labels: set[int] = set()
+    color_workspace = workspace or ColorWorkspace()
+    for _ in range(normalized_width):
+        current, changed, generated = _add_exterior_outline_pass(
+            current,
+            outline_label,
+            transparent_labels=transparent_labels,
+            pixel_perfect=pixel_perfect,
+            adaptive=adaptive,
+            adaptive_darken_percent=adaptive_darken_percent,
+            workspace=color_workspace,
+        )
+        if changed <= 0:
+            break
+        total_changed += changed
+        generated_labels.update(generated)
+    if total_changed == 0:
+        return result, 0, ()
+    return current, total_changed, tuple(sorted(generated_labels))
+
+
+def _add_exterior_outline_pass(
+    result: ProcessResult,
+    outline_label: int,
+    *,
+    transparent_labels: set[int] | None = None,
+    pixel_perfect: bool = True,
+    adaptive: bool = False,
+    adaptive_darken_percent: int = 60,
+    workspace: ColorWorkspace,
 ) -> tuple[ProcessResult, int, tuple[int, ...]]:
     if result.width <= 0 or result.height <= 0:
         return result, 0, ()
@@ -285,13 +343,12 @@ def add_exterior_outline(
     generated_labels: set[int] = set()
     outline_rgb = _label_to_rgb(outline_label)
     darken_percent = _coerce_outline_darken_percent(adaptive_darken_percent)
-    color_workspace = workspace or ColorWorkspace()
     for y in range(result.height):
         for x in range(result.width):
             if not outline_mask[y][x]:
                 continue
             if adaptive:
-                label = _adaptive_outline_label(result, visible, x, y, darken_percent=darken_percent, workspace=color_workspace)
+                label = _adaptive_outline_label(result, visible, x, y, darken_percent=darken_percent, workspace=workspace)
                 next_grid[y][x] = _label_to_rgb(label)
                 generated_labels.add(label)
             else:
@@ -326,7 +383,40 @@ def remove_exterior_outline(
     brightness_threshold_enabled: bool = False,
     brightness_threshold_percent: int = OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT,
     brightness_threshold_direction: str = OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK,
+    width: int = BRUSH_WIDTH_DEFAULT,
     workspace: ColorWorkspace | None = None,
+) -> tuple[ProcessResult, int]:
+    normalized_width = _coerce_brush_width(width)
+    current = result
+    total_changed = 0
+    color_workspace = workspace or ColorWorkspace()
+    for _ in range(normalized_width):
+        current, changed = _remove_exterior_outline_pass(
+            current,
+            transparent_labels=transparent_labels,
+            pixel_perfect=pixel_perfect,
+            brightness_threshold_enabled=brightness_threshold_enabled,
+            brightness_threshold_percent=brightness_threshold_percent,
+            brightness_threshold_direction=brightness_threshold_direction,
+            workspace=color_workspace,
+        )
+        if changed <= 0:
+            break
+        total_changed += changed
+    if total_changed == 0:
+        return result, 0
+    return current, total_changed
+
+
+def _remove_exterior_outline_pass(
+    result: ProcessResult,
+    *,
+    transparent_labels: set[int] | None = None,
+    pixel_perfect: bool = True,
+    brightness_threshold_enabled: bool = False,
+    brightness_threshold_percent: int = OUTLINE_REMOVE_BRIGHTNESS_THRESHOLD_DEFAULT,
+    brightness_threshold_direction: str = OUTLINE_REMOVE_BRIGHTNESS_DIRECTION_DARK,
+    workspace: ColorWorkspace,
 ) -> tuple[ProcessResult, int]:
     if result.width <= 0 or result.height <= 0:
         return result, 0
@@ -339,7 +429,7 @@ def remove_exterior_outline(
             remove_mask,
             threshold_percent=brightness_threshold_percent,
             direction=brightness_threshold_direction,
-            workspace=workspace or ColorWorkspace(),
+            workspace=workspace,
         )
     if pixel_perfect:
         remove_mask = _pixel_perfect_mask(remove_mask)
@@ -630,9 +720,14 @@ def _rasterize_shape_points(
 ) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
     if image_width <= 0 or image_height <= 0:
         return set(), set()
+    stroke_width = _coerce_brush_width(width)
+    if shape == "line":
+        line_mask = Image.new("1", (image_width, image_height), 0)
+        line_draw = ImageDraw.Draw(line_mask)
+        line_draw.line((int(x0), int(y0), int(x1), int(y1)), fill=1, width=stroke_width)
+        return _mask_points(line_mask), set()
     left, right = sorted((int(x0), int(x1)))
     top, bottom = sorted((int(y0), int(y1)))
-    stroke_width = _coerce_brush_width(width)
     fill_mask = Image.new("1", (image_width, image_height), 0)
     outline_mask = Image.new("1", (image_width, image_height), 0)
     fill_draw = ImageDraw.Draw(fill_mask)

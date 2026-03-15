@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import pixel_fix.gui.app as app_module
 from pixel_fix.gui.app import PixelFixGui
 from pixel_fix.palette.sort import (
     PALETTE_SELECT_LABELS,
@@ -106,6 +107,35 @@ def test_builtin_palette_menu_uses_catalog_tree(monkeypatch, tmp_path: Path) -> 
         gui.root.destroy()
 
 
+def test_mouse_button_preferences_menu_uses_persisted_assignments(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(
+        monkeypatch,
+        tmp_path,
+        persisted={
+            "right_mouse_action": app_module.MOUSE_BUTTON_ACTION_SWAP_COLORS,
+            "middle_mouse_action": app_module.MOUSE_BUTTON_ACTION_ERASER,
+        },
+    )
+    try:
+        preference_labels = [
+            gui._menu_items["preferences"].entrycget(index, "label")
+            for index in range(gui._menu_items["preferences"].index("end") + 1)
+            if gui._menu_items["preferences"].type(index) != "separator"
+        ]
+        assert "Mouse Buttons" in preference_labels
+
+        mouse_buttons_menu = gui._menu_items["preferences_mouse_buttons"]
+        mouse_button_labels = [
+            mouse_buttons_menu.entrycget(index, "label")
+            for index in range(mouse_buttons_menu.index("end") + 1)
+        ]
+        assert mouse_button_labels == ["Right Mouse Button", "Middle Mouse Button"]
+        assert gui.right_mouse_action_var.get() == app_module.MOUSE_BUTTON_ACTION_SWAP_COLORS
+        assert gui.middle_mouse_action_var.get() == app_module.MOUSE_BUTTON_ACTION_ERASER
+    finally:
+        gui.root.destroy()
+
+
 def test_selecting_builtin_palette_updates_preview_without_processing(monkeypatch, tmp_path: Path) -> None:
     gui = _build_gui(monkeypatch, tmp_path)
     try:
@@ -118,6 +148,108 @@ def test_selecting_builtin_palette_updates_preview_without_processing(monkeypatc
         assert gui._menu_bar.entrycget("Select", "state") == "normal"
         assert gui.downsample_result is None
         assert gui.palette_result is None
+    finally:
+        gui.root.destroy()
+
+
+def test_opening_palette_browser_creates_popover_and_filters_results(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        gui._open_palette_browser()
+        gui.root.update_idletasks()
+
+        assert gui._palette_browser_window is not None
+        assert gui._palette_browser_window.winfo_exists() == 1
+        assert gui._palette_browser_displayed_entries == gui.builtin_palette_entries
+        assert gui._palette_browser_empty_label is None
+
+        gui._palette_browser_search_var.set("zzz")
+        gui.root.update_idletasks()
+
+        assert gui._palette_browser_displayed_entries == []
+        assert gui._palette_browser_empty_label is not None
+
+        gui._palette_browser_search_var.set("db16")
+        gui.root.update_idletasks()
+
+        assert gui._palette_browser_displayed_entries == gui.builtin_palette_entries
+        assert gui._palette_browser_empty_label is None
+    finally:
+        gui.root.destroy()
+
+
+def test_palette_browser_hover_preview_and_close_restore_active_palette(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        entry = gui.builtin_palette_entries[0]
+        gui._select_builtin_palette(entry)
+        gui._open_palette_browser()
+        gui.root.update_idletasks()
+
+        gui._preview_builtin_palette(entry)
+
+        assert gui._builtin_palette_preview_entry == entry
+        assert gui.palette_info_var.get() == "Palette: Preview: DawnBringer / DB16 (2 colours)"
+
+        gui._close_palette_browser()
+
+        assert gui._builtin_palette_preview_entry is None
+        assert gui.palette_info_var.get() == "Palette: Built-in: DawnBringer / DB16 (2 colours)"
+    finally:
+        gui.root.destroy()
+
+
+def test_palette_browser_selects_entry_and_closes(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        entry = gui.builtin_palette_entries[0]
+        gui._open_palette_browser()
+        gui.root.update_idletasks()
+
+        gui._select_builtin_palette_from_browser(entry)
+
+        assert gui._palette_browser_window is None
+        assert gui.active_palette == [0x112233, 0xABCDEF]
+        assert gui.active_palette_path == str(entry.path)
+    finally:
+        gui.root.destroy()
+
+
+def test_palette_browser_closes_on_escape_and_outside_click(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        gui._open_palette_browser()
+        gui.root.update_idletasks()
+        assert gui._palette_browser_window is not None
+
+        result = gui._on_palette_browser_escape()
+
+        assert result == "break"
+        assert gui._palette_browser_window is None
+
+        gui._open_palette_browser()
+        gui.root.update_idletasks()
+        assert gui._palette_browser_window is not None
+
+        gui._on_palette_browser_root_click(type("Event", (), {"widget": gui.root})())
+
+        assert gui._palette_browser_window is None
+    finally:
+        gui.root.destroy()
+
+
+def test_palette_browser_load_palette_footer_closes_and_delegates(monkeypatch, tmp_path: Path) -> None:
+    gui = _build_gui(monkeypatch, tmp_path)
+    try:
+        calls: list[str] = []
+        gui.load_palette_file = lambda: calls.append("load")
+        gui._open_palette_browser()
+        gui.root.update_idletasks()
+
+        gui._load_palette_file_from_browser()
+
+        assert gui._palette_browser_window is None
+        assert calls == ["load"]
     finally:
         gui.root.destroy()
 
@@ -145,7 +277,7 @@ def test_sorting_builtin_palette_does_not_mutate_catalog_entry(monkeypatch, tmp_
         gui.root.destroy()
 
 
-def test_persisted_builtin_palette_is_not_restored_on_startup(monkeypatch, tmp_path: Path) -> None:
+def test_persisted_builtin_palette_is_restored_on_startup(monkeypatch, tmp_path: Path) -> None:
     palette_root = _create_palette_tree(tmp_path)
     palette_path = str((palette_root / "dawn" / "db16.gpl").resolve())
     gui = _build_gui(
@@ -157,9 +289,10 @@ def test_persisted_builtin_palette_is_not_restored_on_startup(monkeypatch, tmp_p
         },
     )
     try:
-        assert gui.active_palette is None
-        assert gui.active_palette_source == ""
-        assert gui.palette_info_var.get() == "Palette: none"
+        assert gui.active_palette == [0x112233, 0xABCDEF]
+        assert gui.active_palette_source == "Built-in: DawnBringer / DB16"
+        assert gui.active_palette_path == palette_path
+        assert gui.palette_info_var.get() == "Palette: Built-in: DawnBringer / DB16 (2 colours)"
     finally:
         gui.root.destroy()
 
