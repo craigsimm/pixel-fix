@@ -23,11 +23,12 @@ from pixel_fix.gui.processing import (
 )
 from pixel_fix.gui.state import PreviewSettings
 from pixel_fix.io import validate_input_path, validate_output_path
-from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels
+from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels, adjust_structured_palette
 from pixel_fix.palette.catalog import PaletteCatalogEntry, discover_palette_catalog
 from pixel_fix.palette.edit import generate_ramp_palette_labels, merge_palette_labels
 from pixel_fix.palette.io import load_palette, save_palette
-from pixel_fix.palette.quantize import generate_palette
+from pixel_fix.palette.model import StructuredPalette
+from pixel_fix.palette.quantize import generate_palette_source, is_structured_quantizer
 from pixel_fix.palette.sort import (
     PALETTE_SELECT_MODES,
     PALETTE_SORT_MODES,
@@ -40,7 +41,7 @@ from pixel_fix.pipeline import PipelineConfig
 ALLOWED_DOWNSAMPLE_MODES = {"nearest", "bilinear", "rotsprite"}
 ALLOWED_PALETTE_DITHER_MODES = {"none", "ordered", "blue-noise"}
 ALLOWED_COLOR_MODES = {"rgba", "indexed", "grayscale"}
-ALLOWED_QUANTIZERS = {"median-cut", "kmeans"}
+ALLOWED_QUANTIZERS = {"median-cut", "kmeans", "rampforge-8"}
 ALLOWED_OUTLINE_COLOUR_MODES = {"palette", "adaptive"}
 ALLOWED_BRIGHTNESS_DIRECTIONS = {"dark", "bright"}
 ALLOWED_PALETTE_EXPORT_FORMATS = {"gpl", "json"}
@@ -76,6 +77,12 @@ class PaletteExportSpec:
     enabled: bool = False
     format: str = "gpl"
     filename_suffix: str = ".palette.gpl"
+
+
+@dataclass(frozen=True)
+class PaletteSourceData:
+    labels: list[int]
+    structured_palette: StructuredPalette | None = None
 
 
 @dataclass(frozen=True)
@@ -252,13 +259,16 @@ def run_process_job(
 
     downsample_config = _build_pipeline_config(job.settings)
     downsampled = downsample_image(grid, downsample_config)
-    current_palette = _load_initial_palette(job, downsampled.prepared_input.reduced_labels)
+    palette_source = _load_initial_palette(job, downsampled.prepared_input.reduced_labels, workspace=workspace)
+    current_palette = list(palette_source.labels)
+    current_structured_palette = palette_source.structured_palette
     selection: list[int] = []
 
-    current_palette, selection = _apply_palette_steps(
+    current_palette, selection, current_structured_palette = _apply_palette_steps(
         current_palette,
         selection,
         job.palette_steps,
+        structured_palette=current_structured_palette,
         settings=job.settings,
         workspace=workspace,
     )
@@ -269,7 +279,8 @@ def run_process_job(
     result = reduce_palette_image(
         downsampled.prepared_input,
         reduce_config,
-        palette_override=current_palette,
+        palette_override=None if current_structured_palette is not None else current_palette,
+        structured_palette=current_structured_palette,
     )
     result, current_palette, selection = _apply_image_steps(
         result,
@@ -528,21 +539,41 @@ def _settings_to_pipeline_dict(settings: PreviewSettings) -> dict[str, Any]:
     }
 
 
-def _load_initial_palette(job: JobSpec, labels: list[list[int]]) -> list[int]:
+def _load_initial_palette(
+    job: JobSpec,
+    labels: list[list[int]],
+    *,
+    workspace: ColorWorkspace | None = None,
+) -> PaletteSourceData:
+    workspace = workspace or ColorWorkspace()
     source = job.palette_source
     if source.type == "generate":
-        palette = generate_palette(labels, job.settings.palette_reduction_colors, method=job.settings.quantizer)
+        palette_source = generate_palette_source(
+            labels,
+            job.settings.palette_reduction_colors,
+            method=job.settings.quantizer,
+            workspace=workspace,
+            source_label="Generated: RampForge-8" if is_structured_quantizer(job.settings.quantizer) else "Generated",
+        )
+        if isinstance(palette_source, StructuredPalette):
+            palette = palette_source.labels()
+            structured_palette = palette_source
+        else:
+            palette = palette_source
+            structured_palette = None
     elif source.type == "file":
         if source.path is None:
             raise CliJobError("palette_source.path is required for file palettes.")
         palette = load_palette(_resolve_job_path(job, source.path))
+        structured_palette = None
     else:
         if source.path is None:
             raise CliJobError("palette_source.path is required for built-in palettes.")
         palette = list(resolve_builtin_palette(source.path).colors)
+        structured_palette = None
     if not palette:
         raise CliJobError("Palette source produced no colours.")
-    return list(palette)
+    return PaletteSourceData(labels=list(palette), structured_palette=structured_palette)
 
 
 def _apply_palette_steps(
@@ -550,11 +581,13 @@ def _apply_palette_steps(
     selection: list[int],
     steps: tuple[dict[str, Any], ...],
     *,
+    structured_palette: StructuredPalette | None = None,
     settings: PreviewSettings,
     workspace: ColorWorkspace,
-) -> tuple[list[int], list[int]]:
+) -> tuple[list[int], list[int], StructuredPalette | None]:
     current_palette = list(palette)
     current_selection = _normalize_selection(selection, len(current_palette))
+    current_structured_palette = structured_palette
     for step in steps:
         step_type = step["type"]
         if step_type == "select":
@@ -583,6 +616,7 @@ def _apply_palette_steps(
             before = list(current_palette)
             current_palette = sort_palette_labels(current_palette, mode, workspace)
             current_selection = _remap_selection_after_sort(before, current_palette, current_selection)
+            current_structured_palette = None
             continue
         if step_type == "merge_selected":
             selected = _require_selection(current_selection, minimum=2, message="merge_selected requires 2 or more selected colours.")
@@ -597,6 +631,7 @@ def _apply_palette_steps(
                     merged_palette.append(label)
             current_palette = merged_palette
             current_selection = [first_selected]
+            current_structured_palette = None
             continue
         if step_type == "ramp_selected":
             selected = _require_selection(current_selection, minimum=1, message="ramp_selected requires at least one selected colour.")
@@ -607,12 +642,14 @@ def _apply_palette_steps(
                 workspace=workspace,
             )
             current_palette.extend(ramp_labels)
+            current_structured_palette = None
             continue
         if step_type == "remove_selected":
             selected = _require_selection(current_selection, minimum=1, message="remove_selected requires at least one selected colour.")
             selected_set = set(selected)
             current_palette = [label for index, label in enumerate(current_palette) if index not in selected_set]
             current_selection = []
+            current_structured_palette = None
             continue
         if step_type == "add_colors":
             raw_colors = step.get("colors")
@@ -622,6 +659,7 @@ def _apply_palette_steps(
                 label = _parse_color_label(value)
                 if label not in current_palette:
                     current_palette.append(label)
+            current_structured_palette = None
             continue
         if step_type == "adjust_palette":
             scope = str(step.get("scope", "all")).strip().lower()
@@ -641,16 +679,25 @@ def _apply_palette_steps(
                 hue=int(step.get("hue", 0)),
                 saturation=int(step.get("saturation", 100)),
             )
-            current_palette = adjust_palette_labels(
-                current_palette,
-                adjustments,
-                workspace=workspace,
-                selected_indices=selected_indices,
-            )
+            if current_structured_palette is not None:
+                current_structured_palette = adjust_structured_palette(
+                    current_structured_palette,
+                    adjustments,
+                    workspace=workspace,
+                    selected_indices=selected_indices,
+                )
+                current_palette = current_structured_palette.labels()
+            else:
+                current_palette = adjust_palette_labels(
+                    current_palette,
+                    adjustments,
+                    workspace=workspace,
+                    selected_indices=selected_indices,
+                )
             continue
         raise CliJobError(f"Unsupported palette step type: {step_type}")
 
-    return current_palette, _normalize_selection(current_selection, len(current_palette))
+    return current_palette, _normalize_selection(current_selection, len(current_palette)), current_structured_palette
 
 
 def _apply_image_steps(

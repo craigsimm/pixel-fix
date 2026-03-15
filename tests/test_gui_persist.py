@@ -37,6 +37,20 @@ def test_settings_roundtrip() -> None:
     assert restored == settings
 
 
+def test_settings_roundtrip_accepts_rampforge_8() -> None:
+    settings = PreviewSettings(
+        palette_reduction_colors=24,
+        generated_shades=6,
+        contrast_bias=0.7,
+        quantizer="rampforge-8",
+    )
+
+    restored = deserialize_settings(serialize_settings(settings))
+
+    assert restored.quantizer == "rampforge-8"
+    assert restored.palette_reduction_colors == 24
+
+
 def test_default_settings_use_manual_pixel_size() -> None:
     settings = PreviewSettings()
 

@@ -4,17 +4,39 @@ import numpy as np
 from PIL import Image
 
 from pixel_fix.palette.adjust import PaletteAdjustments, adjust_palette_labels, adjust_structured_palette
-from pixel_fix.palette.advanced import detect_key_colors_from_image, generate_structured_palette
+from pixel_fix.palette.advanced import (
+    RAMPFORGE_8_CONTRAST_BIAS,
+    RAMPFORGE_8_GENERATED_SHADES,
+    _RAMPFORGE_8_ORANGE_MODE,
+    _Rampforge8RecoveryCandidate,
+    _Rampforge8ReplaceableSlot,
+    _append_rampforge_8_neutral_ramps,
+    _generate_seed_ramp,
+    _rampforge_8_assignment_key,
+    _rampforge_8_label_mode,
+    _select_rampforge_8_anchors,
+    _seed_shade_index,
+    _unique_mapping_candidates,
+    build_weighted_dataset,
+    detect_key_colors_from_image,
+    generate_structured_palette,
+)
 from pixel_fix.palette.color_modes import convert_mode, extract_unique_colors, to_indexed
 from pixel_fix.palette.dither import apply_dither
 from pixel_fix.palette.edit import generate_ramp_palette_labels, merge_palette_labels
 from pixel_fix.palette.io import load_palette, save_palette
-from pixel_fix.palette.quantize import generate_palette, remap_to_palette
+from pixel_fix.palette.model import StructuredPalette
+from pixel_fix.palette.quantize import generate_palette, generate_palette_source, remap_to_palette
 from pixel_fix.palette.replace import replace_batch, replace_exact, replace_tolerance
 from pixel_fix.palette.sort import (
     PALETTE_SELECT_CHROMA_HIGH,
     PALETTE_SELECT_CHROMA_LOW,
+    PALETTE_SELECT_HUE_CYAN,
     PALETTE_SELECT_HUE_BLUE,
+    PALETTE_SELECT_HUE_GREEN,
+    PALETTE_SELECT_HUE_MAGENTA,
+    PALETTE_SELECT_HUE_RED,
+    PALETTE_SELECT_HUE_YELLOW,
     PALETTE_SELECT_LIGHTNESS_DARK,
     PALETTE_SELECT_LIGHTNESS_LIGHT,
     PALETTE_SELECT_SATURATION_HIGH,
@@ -27,10 +49,57 @@ from pixel_fix.palette.sort import (
     PALETTE_SORT_LIGHTNESS,
     PALETTE_SORT_SATURATION,
     PALETTE_SORT_TEMPERATURE,
+    _palette_metrics,
+    _selection_ranking,
     select_palette_indices,
     sort_palette_labels,
 )
 from pixel_fix.palette.workspace import ColorWorkspace, hyab_distance
+
+
+def _rampforge_vivid_candidates(labels: list[list[int]], mode: str, workspace: ColorWorkspace) -> set[int]:
+    dataset = build_weighted_dataset(labels, workspace)
+    selected_indices = select_palette_indices(dataset.labels.tolist(), mode, 20, workspace)
+    shortlist = [int(dataset.labels[index]) for index in selected_indices]
+    if not shortlist:
+        return set()
+    ranked = _selection_ranking(_palette_metrics(shortlist, workspace), mode)
+    candidate_ranked = [
+        metric
+        for metric in ranked
+        if metric.lightness >= 0.35
+    ] or ranked
+    vivid_count = max(1, (len(candidate_ranked) + 1) // 2)
+    vivid = candidate_ranked[:vivid_count] or candidate_ranked
+    return {int(metric.label) for metric in vivid}
+
+
+def _build_rampforge_baseline_palette(labels: list[list[int]], workspace: ColorWorkspace) -> StructuredPalette:
+    dataset = build_weighted_dataset(labels, workspace)
+    selected = _select_rampforge_8_anchors(dataset, workspace)
+    baseline = generate_structured_palette(
+        labels,
+        key_colors=selected,
+        generated_shades=RAMPFORGE_8_GENERATED_SHADES,
+        contrast_bias=RAMPFORGE_8_CONTRAST_BIAS,
+        workspace=workspace,
+        source_mode="rampforge-8",
+        source_label="Generated: RampForge-8",
+    ).palette
+    if dataset.size > 0:
+        _append_rampforge_8_neutral_ramps(baseline, workspace)
+    return baseline
+
+
+def _weighted_palette_error(labels: list[list[int]], palette: StructuredPalette, workspace: ColorWorkspace) -> float:
+    dataset = build_weighted_dataset(labels, workspace)
+    if dataset.size == 0 or not palette.ramps:
+        return 0.0
+    palette_colors = palette.flattened_colors()
+    palette_oklab = np.asarray([color.oklab for color in palette_colors], dtype=np.float64)
+    primary_indices, _secondary_indices, _ramp_indices = _unique_mapping_candidates(dataset.labels, palette, workspace)
+    distances = hyab_distance(dataset.oklab, palette_oklab[primary_indices]).astype(np.float64, copy=False)
+    return float(np.sum(distances * dataset.counts))
 
 
 def test_color_mode_grayscale_conversion() -> None:
@@ -278,6 +347,328 @@ def test_generate_palette_supports_median_cut() -> None:
     palette = generate_palette(labels, colors=2, method="median-cut")
     assert len(palette) == 2
     assert all(isinstance(value, int) for value in palette)
+
+
+def test_generate_palette_source_supports_rampforge_8() -> None:
+    labels = [
+        [0xAA5533, 0xAA5533, 0x4477AA, 0x4477AA],
+        [0x55AA55, 0x55AA55, 0xAA3355, 0xAA3355],
+    ]
+
+    palette = generate_palette_source(labels, colors=2, method="rampforge-8")
+
+    assert isinstance(palette, StructuredPalette)
+    assert palette.source_mode == "rampforge-8"
+    assert palette.generated_shades == 4
+    assert palette.contrast_bias == 0.6
+    assert 2 <= len(palette.ramps) <= 12
+    assert all(len(ramp.colors) == 5 for ramp in palette.ramps)
+    flattened = {color.label for ramp in palette.ramps for color in ramp.colors}
+    assert 0x000000 in flattened
+    assert 0xFFFFFF in flattened
+
+
+def test_generate_palette_source_rampforge_8_recovery_recovers_missed_source_label_and_preserves_structure() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30, 0xC54444],
+        [0x8A5A30, 0xC77A21, 0xD4B030, 0x55AA33, 0x4477AA],
+        [0xAA55AA, 0x33AACC, 0x8C1E1E, 0x8C1E1E, 0x8A5A30],
+        [0xAA5533, 0x6A4125, 0xDCC322, 0x2E63D8, 0x8A5A30],
+    ]
+
+    baseline = _build_rampforge_baseline_palette(labels, workspace)
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+
+    baseline_labels = {color.label for color in baseline.flattened_colors()}
+    final_labels = {color.label for color in palette.flattened_colors()}
+    source_labels = set(extract_unique_colors(labels))
+
+    assert 0x8C1E1E not in baseline_labels
+    assert 0x8C1E1E in final_labels
+    assert len(palette.ramps) == len(baseline.ramps)
+    assert palette.palette_size() == baseline.palette_size()
+    assert palette.generated_shades == baseline.generated_shades
+    assert [ramp.seed_label for ramp in palette.ramps] == [ramp.seed_label for ramp in baseline.ramps]
+    assert [[color.label for color in ramp.colors] for ramp in palette.ramps[-2:]] == [
+        [color.label for color in ramp.colors] for ramp in baseline.ramps[-2:]
+    ]
+    assert final_labels.difference(baseline_labels).issubset(source_labels)
+
+
+def test_generate_palette_source_rampforge_8_merges_near_duplicates() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0xAA5544, 0xAA5544, 0xAA5544, 0x55AA55],
+        [0xAB5645, 0xAB5645, 0xAB5645, 0x55AA55],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    source_labels = extract_unique_colors(labels)
+    green_candidates = {
+        source_labels[index] for index in select_palette_indices(source_labels, PALETTE_SELECT_HUE_GREEN, 20, workspace)
+    }
+    seed_labels = [ramp.seed_label for ramp in palette.ramps[:-2]]
+
+    assert isinstance(palette, StructuredPalette)
+    assert len(palette.ramps) == 4
+    assert any(label in green_candidates for label in seed_labels)
+
+
+def test_generate_palette_source_rampforge_8_keeps_sparse_green_and_yellow_hues() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0xAA5533, 0xAA5533, 0xAA5533, 0xAA5533],
+        [0xAA5533, 0xAA5533, 0xAA5533, 0xAA5533],
+        [0x4477AA, 0x4477AA, 0x55AA33, 0xD4B030],
+        [0x4477AA, 0xAA3355, 0xAA3355, 0xAA3355],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    source_labels = extract_unique_colors(labels)
+    green_candidates = {
+        source_labels[index] for index in select_palette_indices(source_labels, PALETTE_SELECT_HUE_GREEN, 20, workspace)
+    }
+    yellow_candidates = {
+        source_labels[index] for index in select_palette_indices(source_labels, PALETTE_SELECT_HUE_YELLOW, 20, workspace)
+    }
+    seed_labels = [ramp.seed_label for ramp in palette.ramps[:-2]]
+
+    assert any(label in green_candidates for label in seed_labels)
+    assert any(label in yellow_candidates for label in seed_labels)
+
+
+def test_generate_palette_source_rampforge_8_keeps_all_sparse_canonical_hues() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x777777],
+        [0xC54444, 0xD4B030, 0x55AA33, 0x33AACC],
+        [0x4477AA, 0xAA55AA, 0x8A5A30, 0x8A5A30],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    seed_labels = [ramp.seed_label for ramp in palette.ramps[:-2]]
+    for mode in (
+        PALETTE_SELECT_HUE_RED,
+        PALETTE_SELECT_HUE_YELLOW,
+        PALETTE_SELECT_HUE_GREEN,
+        PALETTE_SELECT_HUE_CYAN,
+        PALETTE_SELECT_HUE_BLUE,
+        PALETTE_SELECT_HUE_MAGENTA,
+    ):
+        candidates = _rampforge_vivid_candidates(labels, mode, workspace)
+        assert any(label in candidates for label in seed_labels)
+
+
+def test_generate_palette_source_rampforge_8_keeps_sparse_vivid_yellow_and_blue_hues() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30, 0xA9662F],
+        [0x8A5A30, 0x8A5A30, 0xAA5533, 0x8A5A30, 0x8A5A30],
+        [0x8A5A30, 0x6A4125, 0x8A5A30, 0xDCC322, 0x8A5A30],
+        [0x8A5A30, 0x8A5A30, 0x2E63D8, 0x8A5A30, 0x8A5A30],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    seed_labels = [ramp.seed_label for ramp in palette.ramps[:-2]]
+    seed_metrics = {int(metric.label): metric for metric in _palette_metrics(seed_labels, workspace)}
+    yellow_candidates = _rampforge_vivid_candidates(labels, PALETTE_SELECT_HUE_YELLOW, workspace)
+    blue_candidates = _rampforge_vivid_candidates(labels, PALETTE_SELECT_HUE_BLUE, workspace)
+
+    chosen_yellows = [label for label in seed_labels if label in yellow_candidates]
+    chosen_blues = [label for label in seed_labels if label in blue_candidates]
+
+    assert chosen_yellows
+    assert chosen_blues
+    assert all(not seed_metrics[label].is_neutral for label in chosen_yellows)
+    assert all(not seed_metrics[label].is_neutral for label in chosen_blues)
+
+
+def test_generate_palette_source_rampforge_8_keeps_distinct_red_orange_and_yellow_hues() -> None:
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30, 0xC54444],
+        [0x8A5A30, 0x8A5A30, 0xC77A21, 0x8A5A30, 0x8A5A30],
+        [0x8A5A30, 0x8A5A30, 0xD4B030, 0x55AA33, 0x4477AA],
+        [0x8A5A30, 0x8A5A30, 0xAA55AA, 0x8A5A30, 0x8A5A30],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    seed_labels = {ramp.seed_label for ramp in palette.ramps[:-2]}
+
+    assert 0xC54444 in seed_labels
+    assert 0xC77A21 in seed_labels
+    assert 0xD4B030 in seed_labels
+
+
+def test_generate_seed_ramp_keeps_red_shadows_in_warm_family() -> None:
+    workspace = ColorWorkspace()
+    ramp = _generate_seed_ramp(0xC54444, 0, RAMPFORGE_8_GENERATED_SHADES, RAMPFORGE_8_CONTRAST_BIAS, workspace)
+    seed_idx = _seed_shade_index(RAMPFORGE_8_GENERATED_SHADES)
+    dark_modes = [_rampforge_8_label_mode(ramp.colors[index].label, workspace) for index in range(seed_idx)]
+
+    assert all(mode is not None for mode in dark_modes)
+    assert any(mode == PALETTE_SELECT_HUE_RED for mode in dark_modes)
+    assert all(mode in {PALETTE_SELECT_HUE_RED, _RAMPFORGE_8_ORANGE_MODE, PALETTE_SELECT_HUE_MAGENTA} for mode in dark_modes)
+
+
+def test_generate_seed_ramp_keeps_yellow_ramp_in_warm_family() -> None:
+    workspace = ColorWorkspace()
+    ramp = _generate_seed_ramp(0xDCC322, 0, RAMPFORGE_8_GENERATED_SHADES, RAMPFORGE_8_CONTRAST_BIAS, workspace)
+    seed_idx = _seed_shade_index(RAMPFORGE_8_GENERATED_SHADES)
+    warm_modes = [_rampforge_8_label_mode(color.label, workspace) for color in ramp.colors if color.shade_index != seed_idx]
+    dark_modes = [_rampforge_8_label_mode(ramp.colors[index].label, workspace) for index in range(seed_idx)]
+
+    assert all(mode is not None for mode in warm_modes)
+    assert all(mode in {_RAMPFORGE_8_ORANGE_MODE, PALETTE_SELECT_HUE_YELLOW} for mode in warm_modes)
+    assert any(mode == _RAMPFORGE_8_ORANGE_MODE for mode in dark_modes)
+
+
+def test_generate_palette_source_rampforge_8_prefers_midtone_bucket_representatives_over_dark_outliers() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30, 0xAA5533],
+        [0x121B46, 0x4070D8, 0x5C4508, 0xC49A18, 0x8A5A30],
+        [0x8A5A30, 0x8A5A30, 0xAA6A33, 0x8A5A30, 0x8A5A30],
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    seed_metrics = {int(metric.label): metric for metric in _palette_metrics([ramp.seed_label for ramp in palette.ramps[:-2]], workspace)}
+    blue_candidates = {0x121B46, 0x4070D8}
+    yellow_candidates = {0x5C4508, 0xC49A18}
+
+    chosen_blue = next(label for label in seed_metrics if label in blue_candidates)
+    chosen_yellow = next(label for label in seed_metrics if label in yellow_candidates)
+
+    assert seed_metrics[chosen_blue].lightness >= 0.35
+    assert seed_metrics[chosen_yellow].lightness >= 0.35
+
+
+def test_generate_palette_source_rampforge_8_avoids_neutralish_chromatic_seed_when_vivid_hues_exist() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x111111, 0xF2F2F2, 0x8A5A30, 0x8A5A30, 0x8A5A30],
+        [0x6A6A6A, 0x8A5A30, 0xAA6A33, 0x8A5A30, 0xAA5533],
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0xDCC322, 0x8A5A30],
+        [0x8A5A30, 0x8A5A30, 0x2E63D8, 0x8A5A30, 0x8A5A30],
+    ]
+
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    seed_labels = [ramp.seed_label for ramp in palette.ramps[:-2]]
+    flattened = {color.label for ramp in palette.ramps for color in ramp.colors}
+    yellow_candidates = _rampforge_vivid_candidates(labels, PALETTE_SELECT_HUE_YELLOW, workspace)
+    blue_candidates = _rampforge_vivid_candidates(labels, PALETTE_SELECT_HUE_BLUE, workspace)
+
+    assert 0x000000 in flattened
+    assert 0xFFFFFF in flattened
+    assert any(label in yellow_candidates for label in seed_labels)
+    assert any(label in blue_candidates for label in seed_labels)
+    assert all(not metric.is_neutral for metric in _palette_metrics(seed_labels, workspace))
+
+
+def test_generate_palette_source_rampforge_8_recovery_reduces_weighted_mapping_error() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0x8A5A30, 0xC54444],
+        [0x8A5A30, 0xC77A21, 0xD4B030, 0x55AA33, 0x4477AA],
+        [0xAA55AA, 0x33AACC, 0x8C1E1E, 0x8C1E1E, 0x8A5A30],
+        [0xAA5533, 0x6A4125, 0xDCC322, 0x2E63D8, 0x8A5A30],
+    ]
+
+    baseline = _build_rampforge_baseline_palette(labels, workspace)
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+
+    assert _weighted_palette_error(labels, palette, workspace) <= _weighted_palette_error(labels, baseline, workspace)
+
+
+def test_generate_palette_source_rampforge_8_recovers_second_rich_red_variant() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x8A5A30, 0x8A5A30, 0x8A5A30, 0xC54444, 0xC54444],
+        [0x8A5A30, 0xC77A21, 0xD4B030, 0x55AA33, 0x4477AA],
+        [0xAA55AA, 0x33AACC, 0xA92D2D, 0xA92D2D, 0x8A5A30],
+        [0xAA5533, 0x6A4125, 0xDCC322, 0x2E63D8, 0x8A5A30],
+    ]
+
+    baseline = _build_rampforge_baseline_palette(labels, workspace)
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+    baseline_labels = {color.label for color in baseline.flattened_colors()}
+    final_labels = {color.label for color in palette.flattened_colors()}
+
+    assert 0xA92D2D not in baseline_labels
+    assert 0xA92D2D in final_labels
+
+
+def test_rampforge_8_recovery_prefers_same_family_slots_for_warm_candidates() -> None:
+    red_slot = _Rampforge8ReplaceableSlot(
+        palette_index=0,
+        ramp_index=0,
+        ramp_mode=PALETTE_SELECT_HUE_RED,
+        shade_index=0,
+        lightness=0.38,
+        seed_lightness=0.50,
+        mapped_weight=0.0,
+        redundancy_distance=0.0,
+        outer_distance=2,
+    )
+    blue_slot = _Rampforge8ReplaceableSlot(
+        palette_index=1,
+        ramp_index=1,
+        ramp_mode=PALETTE_SELECT_HUE_BLUE,
+        shade_index=0,
+        lightness=0.38,
+        seed_lightness=0.50,
+        mapped_weight=0.0,
+        redundancy_distance=0.0,
+        outer_distance=2,
+    )
+    candidate = _Rampforge8RecoveryCandidate(
+        label=0x8C1E1E,
+        mode=PALETTE_SELECT_HUE_RED,
+        lightness=0.35,
+        weight=1.0,
+        weighted_error=1.0,
+        score=1.0,
+    )
+
+    assert _rampforge_8_assignment_key(red_slot, candidate) < _rampforge_8_assignment_key(blue_slot, candidate)
+
+
+def test_generate_palette_source_rampforge_8_recovery_skips_near_duplicate_source_candidates() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0xC54444, 0xC54444, 0x8A5A30, 0x8A5A30, 0x8A5A30],
+        [0xC64343, 0x8A5A30, 0xC77A21, 0xD4B030, 0x55AA33],
+        [0x4477AA, 0xAA55AA, 0x33AACC, 0x8A5A30, 0x8A5A30],
+    ]
+
+    baseline = _build_rampforge_baseline_palette(labels, workspace)
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+
+    assert any(label in {0xC54444, 0xC64343} for label in {ramp.seed_label for ramp in baseline.ramps[:-2]})
+    assert any(label in {0xC54444, 0xC64343} for label in {color.label for color in palette.flattened_colors()})
+    assert 0xC64343 not in {color.label for color in palette.flattened_colors()}
+
+
+def test_generate_palette_source_rampforge_8_recovery_is_noop_without_missing_candidates() -> None:
+    workspace = ColorWorkspace()
+    labels = [
+        [0x101010, 0x101010, 0xF0F0F0],
+        [0xF0F0F0, 0x101010, 0xF0F0F0],
+    ]
+
+    baseline = _build_rampforge_baseline_palette(labels, workspace)
+    palette = generate_palette_source(labels, colors=99, method="rampforge-8")
+
+    assert [color.label for color in palette.flattened_colors()] == [color.label for color in baseline.flattened_colors()]
+
+
+def test_generate_palette_source_rampforge_8_handles_empty_input() -> None:
+    palette = generate_palette_source([], colors=4, method="rampforge-8")
+
+    assert isinstance(palette, StructuredPalette)
+    assert palette.source_mode == "rampforge-8"
+    assert palette.palette_size() == 0
 
 
 def test_color_replacement_variants() -> None:

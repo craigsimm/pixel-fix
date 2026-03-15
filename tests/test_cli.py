@@ -11,6 +11,7 @@ from pixel_fix.cli import build_parser, main
 from pixel_fix.cli_workflow import CliJobError, apply_job_overrides, load_job_spec, resolve_builtin_palette, run_batch_job, run_process_job
 from pixel_fix.gui.processing import downsample_image, image_to_rgb_grid, load_png_rgba_image, reduce_palette_image
 from pixel_fix.palette.io import load_palette, save_palette
+from pixel_fix.palette.workspace import ColorWorkspace
 
 
 def _write_png(path: Path, pixels: list[tuple[int, int, int, int]], size: tuple[int, int]) -> None:
@@ -38,6 +39,8 @@ def test_cli_parser_accepts_process_batch_and_config_init() -> None:
     assert process_args.command == "process"
     assert process_args.input == Path("in.png")
     assert process_args.output == Path("out.png")
+    quantizer_args = parser.parse_args(["process", "in.png", "out.png", "--quantizer", "rampforge-8"])
+    assert quantizer_args.quantizer == "rampforge-8"
 
     batch_args = parser.parse_args(["batch", "inputs", "outputs"])
     assert batch_args.command == "batch"
@@ -85,10 +88,12 @@ def test_cli_overrides_beat_json_config(tmp_path: Path) -> None:
 
     job = load_job_spec(config_path)
     overridden = apply_job_overrides(job, pixel_width=2, palette_reduction_colors=8, quantizer="topk")
+    rampforge = apply_job_overrides(job, quantizer="rampforge-8")
 
     assert overridden.settings.pixel_width == 2
     assert overridden.settings.palette_reduction_colors == 8
     assert overridden.settings.quantizer == "median-cut"
+    assert rampforge.settings.quantizer == "rampforge-8"
 
 
 def test_resolve_builtin_palette_uses_catalog_relative_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -179,15 +184,53 @@ def test_process_job_matches_direct_headless_pipeline(tmp_path: Path) -> None:
     image = load_png_rgba_image(str(input_path))
     grid = image_to_rgb_grid(image)
     downsampled = downsample_image(grid, workflow._build_pipeline_config(job.settings))
-    palette = workflow._load_initial_palette(job, downsampled.prepared_input.reduced_labels)
+    palette_source = workflow._load_initial_palette(job, downsampled.prepared_input.reduced_labels)
     result = reduce_palette_image(
         downsampled.prepared_input,
-        workflow._build_pipeline_config(job.settings, palette_size=len(palette)),
-        palette_override=palette,
+        workflow._build_pipeline_config(job.settings, palette_size=len(palette_source.labels)),
+        palette_override=palette_source.labels,
+        structured_palette=palette_source.structured_palette,
     )
     expected = workflow.process_result_to_rgba_image(result)
     with Image.open(output_path) as actual:
         assert list(actual.getdata()) == list(expected.getdata())
+
+
+def test_process_job_accepts_rampforge_8_quantizer(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.png"
+    output_path = tmp_path / "output.png"
+    _write_png(
+        input_path,
+        [
+            (170, 85, 51, 255),
+            (170, 85, 51, 255),
+            (68, 119, 170, 255),
+            (68, 119, 170, 255),
+            (85, 170, 85, 255),
+            (85, 170, 85, 255),
+            (170, 51, 85, 255),
+            (170, 51, 85, 255),
+        ],
+        (4, 2),
+    )
+    config_path = tmp_path / "job.json"
+    config_path.write_text(
+        json.dumps({"pipeline": {"pixel_width": 1, "palette_reduction_colors": 2, "quantizer": "rampforge-8"}}),
+        encoding="utf-8",
+    )
+    job = load_job_spec(config_path)
+
+    image = load_png_rgba_image(str(input_path))
+    grid = image_to_rgb_grid(image)
+    downsampled = downsample_image(grid, workflow._build_pipeline_config(job.settings))
+    source = workflow._load_initial_palette(job, downsampled.prepared_input.reduced_labels, workspace=ColorWorkspace())
+
+    assert source.structured_palette is not None
+    assert source.structured_palette.source_mode == "rampforge-8"
+
+    run_process_job(input_path, output_path, job, overwrite=True)
+
+    assert output_path.exists()
 
 
 def test_transparency_fill_preserves_alpha_in_saved_png(tmp_path: Path) -> None:

@@ -4,7 +4,13 @@ from collections import Counter
 
 from PIL import Image
 
+from .advanced import generate_rampforge_8_palette
+from .model import StructuredPalette
+from .workspace import ColorWorkspace
 from pixel_fix.types import LabelGrid
+
+RAMPFORGE_8_METHOD = "rampforge-8"
+STRUCTURED_QUANTIZER_METHODS = frozenset({RAMPFORGE_8_METHOD})
 
 
 def _channels(label: int) -> tuple[int, int, int]:
@@ -99,3 +105,24 @@ def generate_palette(labels: LabelGrid, colors: int, method: str = "topk") -> li
     if method == "kmeans":
         return kmeans_palette(labels, colors)
     raise ValueError(f"Unsupported quantizer: {method}")
+
+
+def is_structured_quantizer(method: str) -> bool:
+    return str(method or "").strip().lower() in STRUCTURED_QUANTIZER_METHODS
+
+
+def generate_palette_source(
+    labels: LabelGrid,
+    colors: int,
+    *,
+    method: str = "topk",
+    workspace: ColorWorkspace | None = None,
+    source_label: str = "Generated",
+) -> list[int] | StructuredPalette:
+    if is_structured_quantizer(method):
+        return generate_rampforge_8_palette(
+            labels,
+            workspace=workspace,
+            source_label=source_label,
+        ).palette
+    return generate_palette(labels, colors, method=method)
