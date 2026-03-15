@@ -10,6 +10,9 @@ from pixel_fix.gui.processing import (
     ProcessResult,
     ProcessStats,
     add_exterior_outline,
+    apply_bucket_fill,
+    apply_ellipse_operation,
+    apply_rectangle_operation,
     apply_transparency_fill,
     downsample_image,
     process_image,
@@ -269,6 +272,157 @@ def test_apply_transparency_fill_only_removes_connected_region() -> None:
         (False, False, True),
         (True, True, True),
     )
+
+
+def test_apply_bucket_fill_only_updates_connected_visible_region() -> None:
+    result = _result_from_labels(
+        [
+            [0xFF0000, 0xFF0000, 0x0000FF],
+            [0x0000FF, 0x0000FF, 0xFF0000],
+        ]
+    )
+
+    updated, changed = apply_bucket_fill(result, 0, 0, 0x00FF00)
+
+    assert changed == 2
+    assert updated.grid[0][0] == (0x00, 0xFF, 0x00)
+    assert updated.grid[0][1] == (0x00, 0xFF, 0x00)
+    assert updated.grid[1][2] == (0xFF, 0x00, 0x00)
+
+
+def test_apply_bucket_fill_can_fill_connected_transparent_region() -> None:
+    result = _result_from_labels(
+        [
+            [0x112233, 0x445566, 0x778899],
+            [0xAABBCC, 0xDDEEFF, 0x123456],
+        ]
+    )
+    result = ProcessResult(
+        grid=result.grid,
+        width=result.width,
+        height=result.height,
+        stats=result.stats,
+        prepared_input=result.prepared_input,
+        alpha_mask=((False, False, True), (False, True, True)),
+    )
+
+    updated, changed = apply_bucket_fill(result, 0, 0, 0x00FF00)
+
+    assert changed == 3
+    assert updated.alpha_mask is None
+    assert updated.grid[0][0] == (0x00, 0xFF, 0x00)
+    assert updated.grid[0][1] == (0x00, 0xFF, 0x00)
+    assert updated.grid[1][0] == (0x00, 0xFF, 0x00)
+
+
+def test_apply_bucket_fill_reports_no_change_when_visible_region_already_matches() -> None:
+    result = _result_from_labels([[0x00FF00, 0x00FF00]])
+
+    updated, changed = apply_bucket_fill(result, 0, 0, 0x00FF00)
+
+    assert changed == 0
+    assert updated is result
+
+
+def test_apply_rectangle_operation_draws_outline_and_fill() -> None:
+    result = _result_from_labels(
+        [
+            [0x111111, 0x111111, 0x111111],
+            [0x111111, 0x111111, 0x111111],
+            [0x111111, 0x111111, 0x111111],
+        ]
+    )
+    result = ProcessResult(
+        grid=result.grid,
+        width=result.width,
+        height=result.height,
+        stats=result.stats,
+        prepared_input=result.prepared_input,
+        alpha_mask=((False, False, False), (False, False, False), (False, False, False)),
+    )
+
+    updated, changed = apply_rectangle_operation(result, 0, 0, 2, 2, 0xAA0000, fill_label=0x00BB00, width=1)
+
+    assert changed == 9
+    assert updated.alpha_mask is None
+    assert updated.grid[0][0] == (0xAA, 0x00, 0x00)
+    assert updated.grid[1][1] == (0x00, 0xBB, 0x00)
+
+
+def test_apply_rectangle_operation_can_use_transparent_fill() -> None:
+    result = _result_from_labels(
+        [
+            [0x445566, 0x445566, 0x445566],
+            [0x445566, 0x445566, 0x445566],
+            [0x445566, 0x445566, 0x445566],
+        ]
+    )
+
+    updated, changed = apply_rectangle_operation(result, 0, 0, 2, 2, 0xAA0000, fill_label=None, width=1)
+
+    assert changed == 9
+    assert updated.alpha_mask is not None
+    assert updated.alpha_mask[1][1] is False
+    assert updated.grid[0][1] == (0xAA, 0x00, 0x00)
+
+
+def test_apply_rectangle_operation_respects_outline_width() -> None:
+    result = _result_from_labels(
+        [
+            [0x111111] * 7,
+            [0x111111] * 7,
+            [0x111111] * 7,
+            [0x111111] * 7,
+            [0x111111] * 7,
+            [0x111111] * 7,
+            [0x111111] * 7,
+        ]
+    )
+    result = ProcessResult(
+        grid=result.grid,
+        width=result.width,
+        height=result.height,
+        stats=result.stats,
+        prepared_input=result.prepared_input,
+        alpha_mask=tuple(tuple(False for _ in range(7)) for _ in range(7)),
+    )
+
+    updated, changed = apply_rectangle_operation(result, 0, 0, 6, 6, 0xAA0000, fill_label=None, width=2)
+
+    assert changed > 0
+    assert updated.alpha_mask is not None
+    assert updated.alpha_mask[1][1] is True
+    assert updated.alpha_mask[3][3] is False
+    assert updated.grid[1][1] == (0xAA, 0x00, 0x00)
+
+
+def test_apply_ellipse_operation_draws_expected_pixels() -> None:
+    result = _result_from_labels(
+        [
+            [0x111111] * 5,
+            [0x111111] * 5,
+            [0x111111] * 5,
+            [0x111111] * 5,
+            [0x111111] * 5,
+        ]
+    )
+    result = ProcessResult(
+        grid=result.grid,
+        width=result.width,
+        height=result.height,
+        stats=result.stats,
+        prepared_input=result.prepared_input,
+        alpha_mask=tuple(tuple(False for _ in range(5)) for _ in range(5)),
+    )
+
+    updated, changed = apply_ellipse_operation(result, 0, 0, 4, 4, 0xAA0000, fill_label=0x00BB00, width=1)
+
+    assert changed > 0
+    assert updated.alpha_mask is not None
+    assert updated.alpha_mask[0][0] is False
+    assert updated.alpha_mask[0][2] is True
+    assert updated.grid[0][2] == (0xAA, 0x00, 0x00)
+    assert updated.grid[2][2] == (0x00, 0xBB, 0x00)
 
 
 def test_add_exterior_outline_defaults_to_pixel_perfect_diamond() -> None:
@@ -772,6 +926,153 @@ def test_gui_brush_stroke_captures_single_undo_for_press_drag_release() -> None:
     assert calls == ["capture"]
 
 
+def test_shape_preview_image_uses_temporary_rasterized_result() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.downsample_result = ProcessResult(
+        grid=[[(17, 17, 17), (17, 17, 17), (17, 17, 17)], [(17, 17, 17), (17, 17, 17), (17, 17, 17)], [(17, 17, 17), (17, 17, 17), (17, 17, 17)]],
+        width=3,
+        height=3,
+        stats=ProcessStats(
+            stage="downsample",
+            pixel_width=1,
+            resize_method="nearest",
+            input_size=(3, 3),
+            output_size=(3, 3),
+            initial_color_count=1,
+            color_count=1,
+            elapsed_seconds=0.0,
+        ),
+        prepared_input=PipelinePreparedResult(
+            reduced_labels=[[0x111111] * 3 for _ in range(3)],
+            pixel_width=1,
+            grid_method="manual",
+            input_size=(3, 3),
+            initial_color_count=1,
+        ),
+        alpha_mask=((False, False, False), (False, False, False), (False, False, False)),
+    )
+    gui.palette_result = None
+    gui.transparent_colors = set()
+    gui.primary_color_label = 0xAA0000
+    gui.secondary_color_label = 0x00BB00
+    gui.transparent_color_slot = None
+    gui.brush_width_var = SimpleNamespace(get=lambda: 1)
+    gui._shape_drag_active = True
+    gui._shape_preview_anchor = (0, 0)
+    gui._shape_preview_current = (2, 2)
+    gui._shape_preview_tool_mode = app_module.CANVAS_TOOL_MODE_RECTANGLE
+    gui._shape_preview_constrained = False
+
+    preview = PixelFixGui._shape_preview_image(gui)
+
+    assert preview is not None
+    assert preview.getpixel((0, 0)) == (0xAA, 0x00, 0x00, 255)
+    assert preview.getpixel((1, 1)) == (0x00, 0xBB, 0x00, 255)
+    assert gui.downsample_result.alpha_mask is not None
+    assert gui.downsample_result.alpha_mask[1][1] is False
+
+
+def test_gui_bucket_click_updates_output_and_keeps_bucket_mode() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.downsample_result = _result_from_labels(
+        [
+            [0xFF0000, 0xFF0000, 0x0000FF],
+            [0x0000FF, 0x0000FF, 0xFF0000],
+        ]
+    )
+    gui.palette_result = None
+    gui.original_display_image = object()
+    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_BUCKET
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.transparent_colors = set()
+    gui.primary_color_label = 0x00FF00
+    gui.secondary_color_label = 0x445566
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui._preview_image_coordinates = lambda _x, _y, **_kwargs: (0, 0)
+    gui._capture_palette_undo_state = lambda: setattr(gui, "captured_undo", True)
+    gui.redraw_canvas = lambda: None
+    gui._refresh_action_states = lambda: None
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=5, y=5))
+
+    assert gui.canvas_tool_mode == app_module.CANVAS_TOOL_MODE_BUCKET
+    assert gui.downsample_result.grid[0][0] == (0x00, 0xFF, 0x00)
+    assert gui.downsample_result.grid[0][1] == (0x00, 0xFF, 0x00)
+    assert gui.process_status_var.value == "Filled 2 pixels with #00FF00. Press Undo to restore it."
+    assert gui.captured_undo is True
+
+
+def test_gui_shape_drag_captures_single_undo_and_commits_once() -> None:
+    calls: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.original_display_image = object()
+    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_RECTANGLE
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.dragging = False
+    gui.canvas = SimpleNamespace(configure=lambda **_kwargs: None)
+    gui.redraw_canvas = lambda: calls.append("redraw")
+    gui._preview_image_coordinates = lambda x, y, **_kwargs: (x, y)
+    gui._cursor_for_pointer = lambda: ""
+    gui._capture_palette_undo_state = lambda: calls.append("capture")
+    gui._shape_preview_operation = lambda: (_result_from_labels([[0x123456]]), 1)
+    gui._set_current_output_result = lambda _result: calls.append("set")
+    gui._refresh_output_display_images = lambda: calls.append("refresh-images")
+    gui._refresh_action_states = lambda: calls.append("actions")
+    gui.process_status_var = SimpleNamespace(value="", set=lambda value: setattr(gui.process_status_var, "value", value))
+    gui.transparent_colors = set()
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=1, y=1, state=0))
+    PixelFixGui._on_canvas_drag(gui, SimpleNamespace(x=3, y=2, state=0))
+    PixelFixGui._on_canvas_release(gui, SimpleNamespace(x=3, y=2, state=0))
+
+    assert calls.count("capture") == 1
+    assert "set" in calls
+    assert "refresh-images" in calls
+    assert gui.process_status_var.value == "Rectangle changed 1 pixel. Press Undo to restore it."
+    assert gui._shape_drag_active is False
+
+
+def test_gui_shape_drag_noop_release_clears_undo_and_preview_state() -> None:
+    calls: list[str] = []
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.original_display_image = object()
+    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_ELLIPSE
+    gui.palette_add_pick_mode = False
+    gui.transparency_pick_mode = False
+    gui.dragging = False
+    gui.canvas = SimpleNamespace(configure=lambda **_kwargs: None)
+    gui.redraw_canvas = lambda: calls.append("redraw")
+    gui._preview_image_coordinates = lambda x, y, **_kwargs: (x, y)
+    gui._cursor_for_pointer = lambda: ""
+    gui._capture_palette_undo_state = lambda: calls.append("capture")
+    gui._clear_palette_undo_state = lambda: calls.append("clear")
+    gui._shape_preview_operation = lambda: (None, 0)
+
+    PixelFixGui._on_canvas_press(gui, SimpleNamespace(x=1, y=1, state=0))
+    PixelFixGui._on_canvas_drag(gui, SimpleNamespace(x=2, y=2, state=app_module.EVENT_STATE_SHIFT_MASK))
+    PixelFixGui._on_canvas_release(gui, SimpleNamespace(x=2, y=2, state=app_module.EVENT_STATE_SHIFT_MASK))
+
+    assert calls.count("capture") == 1
+    assert "clear" in calls
+    assert gui._shape_drag_active is False
+    assert gui._shape_preview_anchor is None
+    assert gui._shape_preview_current is None
+
+
+def test_resolved_shape_preview_endpoint_constrains_square_with_shift() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui._shape_preview_anchor = (1, 1)
+    gui._shape_preview_current = (4, 2)
+    gui._shape_preview_constrained = True
+
+    endpoint = PixelFixGui._resolved_shape_preview_endpoint(gui, _result_from_labels([[0x112233] * 6 for _ in range(6)]))
+
+    assert endpoint == (4, 4)
+
+
 def test_undo_palette_application_restores_previous_preview_state() -> None:
     downsampled = downsample_image(_sample_grid(), PipelineConfig(pixel_width=2))
     structured_palette = generate_structured_palette(
@@ -1219,6 +1520,63 @@ def test_generate_override_palette_requires_downsample(monkeypatch) -> None:
     PixelFixGui._generate_override_palette_from_settings(gui, gui.session.current)
 
     assert messages == ["Downsample the image before generating an override palette."]
+
+
+def test_generate_override_palette_uses_structured_preview_for_rampforge_8(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "processed_current"
+    gui.prepared_input_cache = SimpleNamespace(
+        reduced_labels=[
+            [0xAA5533, 0x4477AA],
+            [0x55AA55, 0xAA3355],
+        ]
+    )
+    gui.session = SimpleNamespace(current=PreviewSettings(palette_reduction_colors=24, quantizer="rampforge-8"))
+    gui._apply_structured_palette_preview = lambda palette, *, message, mark_stale=True, capture_undo=False: captured.update(
+        {
+            "palette": palette,
+            "message": message,
+            "mark_stale": mark_stale,
+            "capture_undo": capture_undo,
+        }
+    )
+    palette = generate_structured_palette(
+        gui.prepared_input_cache.reduced_labels,
+        key_colors=[0xAA5533, 0x4477AA],
+        generated_shades=6,
+        contrast_bias=0.7,
+        source_label="Generated: RampForge-8",
+        source_mode="rampforge-8",
+    ).palette
+
+    monkeypatch.setattr(
+        app_module,
+        "generate_override_palette",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("flat override path should not run")),
+    )
+
+    def fake_generate(labels, colors, *, method, workspace=None, source_label):
+        captured["labels"] = labels
+        captured["colors"] = colors
+        captured["method"] = method
+        captured["source_label"] = source_label
+        return palette
+
+    monkeypatch.setattr(app_module, "generate_palette_source", fake_generate)
+
+    PixelFixGui._generate_override_palette_from_settings(gui, gui.session.current)
+
+    assert captured["labels"] == gui.prepared_input_cache.reduced_labels
+    assert captured["colors"] == 0
+    assert captured["method"] == "rampforge-8"
+    assert captured["source_label"] == "Generated: RampForge-8"
+    assert captured["palette"].source_mode == "rampforge-8"
+    assert captured["mark_stale"] is True
+    assert captured["message"] == (
+        f"Generated a {palette.palette_size()}-colour RampForge-8 palette across {len(palette.ramps)} ramps. "
+        "Click Apply Palette to use it."
+    )
 
 
 def test_load_palette_file_browses_for_gpl_files(monkeypatch) -> None:
@@ -1825,6 +2183,56 @@ def test_selection_threshold_change_persists_without_marking_output_stale() -> N
     assert messages == ["Selection threshold set to 30%.", "persist", "refresh"]
 
 
+def test_refresh_brush_control_states_enables_bucket_and_shape_buttons() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "processed_current"
+    gui.primary_color_label = 0x112233
+    gui.secondary_color_label = 0x445566
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_SECONDARY
+    gui.bucket_button = WidgetStub()
+    gui.pencil_button = WidgetStub()
+    gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
+    gui.brush_width_spinbox = WidgetStub()
+    gui.brush_shape_dropdown_button = WidgetStub()
+    gui._current_output_result = lambda: object()
+
+    PixelFixGui._refresh_brush_control_states(gui)
+
+    assert gui.bucket_button.state == app_module.tk.NORMAL
+    assert gui.pencil_button.state == app_module.tk.NORMAL
+    assert gui.eraser_button.state == app_module.tk.NORMAL
+    assert gui.circle_button.state == app_module.tk.NORMAL
+    assert gui.square_button.state == app_module.tk.NORMAL
+    assert gui.brush_width_spinbox.state == "normal"
+    assert gui.brush_shape_dropdown_button.state == app_module.tk.NORMAL
+
+
+def test_refresh_brush_control_states_disables_primary_colour_tools_when_primary_is_transparent() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "processed_current"
+    gui.primary_color_label = 0x112233
+    gui.secondary_color_label = 0x445566
+    gui.transparent_color_slot = app_module.ACTIVE_COLOR_SLOT_PRIMARY
+    gui.bucket_button = WidgetStub()
+    gui.pencil_button = WidgetStub()
+    gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
+    gui.brush_width_spinbox = WidgetStub()
+    gui.brush_shape_dropdown_button = WidgetStub()
+    gui._current_output_result = lambda: object()
+
+    PixelFixGui._refresh_brush_control_states(gui)
+
+    assert gui.bucket_button.state == app_module.tk.DISABLED
+    assert gui.pencil_button.state == app_module.tk.DISABLED
+    assert gui.eraser_button.state == app_module.tk.NORMAL
+    assert gui.circle_button.state == app_module.tk.DISABLED
+    assert gui.square_button.state == app_module.tk.DISABLED
+
+
 def test_refresh_action_states_enables_outline_buttons_with_processed_output_and_single_selection() -> None:
     gui = PixelFixGui.__new__(PixelFixGui)
     gui.image_state = "processed_current"
@@ -1841,8 +2249,11 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
     gui.generate_override_palette_button = WidgetStub()
     gui.reduce_palette_button = WidgetStub()
     gui.transparency_button = WidgetStub()
+    gui.bucket_button = WidgetStub()
     gui.pencil_button = WidgetStub()
     gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
     gui.add_outline_button = WidgetStub()
     gui.remove_outline_button = WidgetStub()
     gui.brush_width_spinbox = WidgetStub()
@@ -1887,8 +2298,11 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
 
     assert gui.add_outline_button.state == app_module.tk.NORMAL
     assert gui.remove_outline_button.state == app_module.tk.NORMAL
+    assert gui.bucket_button.state == app_module.tk.NORMAL
     assert gui.pencil_button.state == app_module.tk.NORMAL
     assert gui.eraser_button.state == app_module.tk.NORMAL
+    assert gui.circle_button.state == app_module.tk.NORMAL
+    assert gui.square_button.state == app_module.tk.NORMAL
     assert gui.merge_palette_button.state == app_module.tk.DISABLED
     assert gui.ramp_palette_button.state == app_module.tk.NORMAL
     assert gui.brush_width_spinbox.state == "normal"
@@ -1897,6 +2311,48 @@ def test_refresh_action_states_enables_outline_buttons_with_processed_output_and
     assert gui.outline_remove_brightness_threshold_toggle.state == app_module.tk.NORMAL
     assert gui.outline_remove_brightness_threshold_spinbox.state == "disabled"
     assert gui.outline_remove_brightness_direction_dark_button.state == "disabled"
+
+
+def test_refresh_action_states_disables_palette_size_for_rampforge_8() -> None:
+    gui = PixelFixGui.__new__(PixelFixGui)
+    gui.image_state = "processed_current"
+    gui.original_grid = _sample_grid()
+    gui.prepared_input_cache = object()
+    gui._palette_undo_state = None
+    gui._palette_selection_indices = set()
+    gui._displayed_palette = [0x112233]
+    gui.session = SimpleNamespace(
+        current=PreviewSettings(quantizer="rampforge-8"),
+        history=SimpleNamespace(can_undo=lambda: False, can_redo=lambda: False),
+    )
+    gui.pixel_width_spinbox = WidgetStub()
+    gui.palette_reduction_spinbox = WidgetStub()
+    gui.palette_adjustment_controls = []
+    gui._menu_items = {
+        "view": MenuStub(),
+        "file": MenuStub(),
+        "edit": MenuStub(),
+        "palette": MenuStub(),
+        "palette_add": MenuStub(),
+        "preferences": MenuStub(),
+    }
+    gui._menu_bar = MenuStub()
+    gui._has_palette_source = lambda: True
+    gui._current_output_result = lambda: object()
+    gui._outline_adaptive_enabled = lambda: False
+    gui._set_tool_button_enabled = lambda *_args, **_kwargs: None
+    gui._refresh_brush_control_states = lambda: None
+    gui._refresh_outline_control_states = lambda: None
+    gui._refresh_tool_button_styles = lambda: None
+
+    PixelFixGui._refresh_action_states(gui)
+
+    assert gui.palette_reduction_spinbox.state == "disabled"
+
+    gui.session.current = PreviewSettings(quantizer="kmeans")
+    PixelFixGui._refresh_action_states(gui)
+
+    assert gui.palette_reduction_spinbox.state == "normal"
 
 
 def test_refresh_action_states_enables_merge_with_multiple_selected_swatches() -> None:
@@ -1914,8 +2370,15 @@ def test_refresh_action_states_enables_merge_with_multiple_selected_swatches() -
     gui.generate_override_palette_button = WidgetStub()
     gui.reduce_palette_button = WidgetStub()
     gui.transparency_button = WidgetStub()
+    gui.bucket_button = WidgetStub()
+    gui.pencil_button = WidgetStub()
+    gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
     gui.add_outline_button = WidgetStub()
     gui.remove_outline_button = WidgetStub()
+    gui.brush_width_spinbox = WidgetStub()
+    gui.brush_shape_dropdown_button = WidgetStub()
     gui.outline_palette_mode_button = WidgetStub()
     gui.outline_adaptive_mode_button = WidgetStub()
     gui.outline_adaptive_darken_spinbox = WidgetStub()
@@ -1975,8 +2438,11 @@ def test_refresh_action_states_enables_outline_without_selection_in_adaptive_mod
     gui.generate_override_palette_button = WidgetStub()
     gui.reduce_palette_button = WidgetStub()
     gui.transparency_button = WidgetStub()
+    gui.bucket_button = WidgetStub()
     gui.pencil_button = WidgetStub()
     gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
     gui.add_outline_button = WidgetStub()
     gui.remove_outline_button = WidgetStub()
     gui.brush_width_spinbox = WidgetStub()
@@ -2042,8 +2508,15 @@ def test_refresh_action_states_enables_remove_threshold_controls_when_enabled() 
     gui.generate_override_palette_button = WidgetStub()
     gui.reduce_palette_button = WidgetStub()
     gui.transparency_button = WidgetStub()
+    gui.bucket_button = WidgetStub()
+    gui.pencil_button = WidgetStub()
+    gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
     gui.add_outline_button = WidgetStub()
     gui.remove_outline_button = WidgetStub()
+    gui.brush_width_spinbox = WidgetStub()
+    gui.brush_shape_dropdown_button = WidgetStub()
     gui.outline_palette_mode_button = WidgetStub()
     gui.outline_adaptive_mode_button = WidgetStub()
     gui.outline_adaptive_darken_spinbox = WidgetStub()
@@ -2090,21 +2563,27 @@ def test_refresh_action_states_enables_remove_threshold_controls_when_enabled() 
 
 def test_refresh_tool_button_styles_marks_active_tool_and_view() -> None:
     gui = PixelFixGui.__new__(PixelFixGui)
-    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK
+    gui.canvas_tool_mode = app_module.CANVAS_TOOL_MODE_RECTANGLE
     gui.palette_add_pick_mode = False
     gui.transparency_pick_mode = False
     gui.view_var = SimpleNamespace(get=lambda: "processed")
+    gui.bucket_button = WidgetStub()
     gui.pencil_button = WidgetStub()
     gui.eraser_button = WidgetStub()
+    gui.circle_button = WidgetStub()
+    gui.square_button = WidgetStub()
     gui.palette_picker_button = WidgetStub()
     gui.view_original_button = WidgetStub()
     gui.view_processed_button = WidgetStub()
 
     PixelFixGui._refresh_tool_button_styles(gui)
 
+    assert gui.bucket_button.style == "ToolButton.TButton"
     assert gui.pencil_button.style == "ToolButton.TButton"
     assert gui.eraser_button.style == "ToolButton.TButton"
-    assert gui.palette_picker_button.style == "ToolButtonActive.TButton"
+    assert gui.circle_button.style == "ToolButton.TButton"
+    assert gui.square_button.style == "ToolButtonActive.TButton"
+    assert gui.palette_picker_button.style == "ToolButton.TButton"
     assert gui.view_original_button.style == "ToolButton.TButton"
     assert gui.view_processed_button.style == "ToolButtonActive.TButton"
 

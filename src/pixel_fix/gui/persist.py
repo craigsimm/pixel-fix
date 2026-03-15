@@ -234,7 +234,7 @@ def _coerce_palette_reduction_method(value: Any) -> str:
     parsed = str(value or "median-cut").strip().lower()
     if parsed == "topk":
         return "median-cut"
-    if parsed in {"median-cut", "kmeans"}:
+    if parsed in {"median-cut", "kmeans", "rampforge-8"}:
         return parsed
     return "median-cut"
 

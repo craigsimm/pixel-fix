@@ -6,7 +6,7 @@ from functools import lru_cache
 from time import perf_counter
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from pixel_fix.palette.model import StructuredPalette
 from pixel_fix.palette.color_modes import extract_unique_colors
@@ -99,6 +99,99 @@ def apply_transparency_fill(result: ProcessResult, x: int, y: int) -> tuple[Proc
     if changed == 0:
         return result, 0
     return replace(result, alpha_mask=tuple(tuple(row) for row in next_mask)), changed
+
+
+def apply_bucket_fill(result: ProcessResult, x: int, y: int, label: int) -> tuple[ProcessResult, int]:
+    if result.width <= 0 or result.height <= 0:
+        return result, 0
+    if x < 0 or y < 0 or x >= result.width or y >= result.height:
+        return result, 0
+    current_mask = result.alpha_mask
+    seed_visible = True if current_mask is None else bool(current_mask[y][x])
+    target_rgb = _label_to_rgb(label)
+    seed_rgb = result.grid[y][x]
+    pending = [(x, y)]
+    visited: set[tuple[int, int]] = set()
+    changed_points: set[tuple[int, int]] = set()
+    next_grid = [list(row) for row in result.grid]
+    next_mask = [list(row) for row in current_mask] if current_mask is not None else None
+    while pending:
+        point_x, point_y = pending.pop()
+        if point_x < 0 or point_y < 0 or point_x >= result.width or point_y >= result.height:
+            continue
+        point = (point_x, point_y)
+        if point in visited:
+            continue
+        visited.add(point)
+        point_visible = True if current_mask is None else bool(current_mask[point_y][point_x])
+        if point_visible != seed_visible:
+            continue
+        if seed_visible and result.grid[point_y][point_x] != seed_rgb:
+            continue
+        current_rgb = result.grid[point_y][point_x]
+        if (not point_visible) or current_rgb != target_rgb:
+            next_grid[point_y][point_x] = target_rgb
+            changed_points.add(point)
+        if next_mask is not None and not point_visible:
+            next_mask[point_y][point_x] = True
+            changed_points.add(point)
+        pending.append((point_x - 1, point_y))
+        pending.append((point_x + 1, point_y))
+        pending.append((point_x, point_y - 1))
+        pending.append((point_x, point_y + 1))
+    if not changed_points:
+        return result, 0
+    if next_mask is not None:
+        return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), len(changed_points)
+    return replace(result, grid=next_grid), len(changed_points)
+
+
+def apply_rectangle_operation(
+    result: ProcessResult,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    outline_label: int,
+    *,
+    fill_label: int | None,
+    width: int = BRUSH_WIDTH_DEFAULT,
+) -> tuple[ProcessResult, int]:
+    return _apply_shape_operation(
+        result,
+        "rectangle",
+        x0,
+        y0,
+        x1,
+        y1,
+        outline_label=outline_label,
+        fill_label=fill_label,
+        width=width,
+    )
+
+
+def apply_ellipse_operation(
+    result: ProcessResult,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    outline_label: int,
+    *,
+    fill_label: int | None,
+    width: int = BRUSH_WIDTH_DEFAULT,
+) -> tuple[ProcessResult, int]:
+    return _apply_shape_operation(
+        result,
+        "ellipse",
+        x0,
+        y0,
+        x1,
+        y1,
+        outline_label=outline_label,
+        fill_label=fill_label,
+        width=width,
+    )
 
 
 def brush_footprint(width: int = BRUSH_WIDTH_DEFAULT, shape: str = BRUSH_SHAPE_SQUARE) -> set[tuple[int, int]]:
@@ -433,6 +526,138 @@ def _matches_outline_remove_brightness_threshold(
 
 def _label_to_rgb(label: int) -> RGB:
     return ((label >> 16) & 0xFF, (label >> 8) & 0xFF, label & 0xFF)
+
+
+def _apply_shape_operation(
+    result: ProcessResult,
+    shape: str,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    *,
+    outline_label: int,
+    fill_label: int | None,
+    width: int,
+) -> tuple[ProcessResult, int]:
+    if result.width <= 0 or result.height <= 0:
+        return result, 0
+    outline_points, fill_points = _rasterize_shape_points(
+        shape,
+        result.width,
+        result.height,
+        x0,
+        y0,
+        x1,
+        y1,
+        width=width,
+    )
+    if not outline_points and not fill_points:
+        return result, 0
+    current_mask = result.alpha_mask
+    next_grid = [list(row) for row in result.grid]
+    needs_mask_copy = current_mask is not None or fill_label is None
+    next_mask = (
+        [list(row) for row in current_mask]
+        if current_mask is not None
+        else ([[True] * result.width for _ in range(result.height)] if needs_mask_copy else None)
+    )
+    changed_points: set[tuple[int, int]] = set()
+    if fill_points:
+        _apply_shape_points(
+            result,
+            next_grid,
+            next_mask,
+            changed_points,
+            fill_points,
+            label=fill_label,
+        )
+    if outline_points:
+        _apply_shape_points(
+            result,
+            next_grid,
+            next_mask,
+            changed_points,
+            outline_points,
+            label=outline_label,
+        )
+    if not changed_points:
+        return result, 0
+    if next_mask is not None:
+        return replace(result, grid=next_grid, alpha_mask=_normalize_alpha_mask(next_mask)), len(changed_points)
+    return replace(result, grid=next_grid), len(changed_points)
+
+
+def _apply_shape_points(
+    result: ProcessResult,
+    next_grid: RGBGrid,
+    next_mask: list[list[bool]] | None,
+    changed_points: set[tuple[int, int]],
+    points: set[tuple[int, int]],
+    *,
+    label: int | None,
+) -> None:
+    current_mask = result.alpha_mask
+    target_rgb = _label_to_rgb(label) if label is not None else None
+    for point_x, point_y in points:
+        current_visible = True if current_mask is None else bool(current_mask[point_y][point_x])
+        if label is None:
+            if not current_visible:
+                continue
+            assert next_mask is not None
+            next_mask[point_y][point_x] = False
+            changed_points.add((point_x, point_y))
+            continue
+        assert target_rgb is not None
+        if current_visible and result.grid[point_y][point_x] == target_rgb:
+            continue
+        next_grid[point_y][point_x] = target_rgb
+        if next_mask is not None:
+            next_mask[point_y][point_x] = True
+        changed_points.add((point_x, point_y))
+
+
+def _rasterize_shape_points(
+    shape: str,
+    image_width: int,
+    image_height: int,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    *,
+    width: int,
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
+    if image_width <= 0 or image_height <= 0:
+        return set(), set()
+    left, right = sorted((int(x0), int(x1)))
+    top, bottom = sorted((int(y0), int(y1)))
+    stroke_width = _coerce_brush_width(width)
+    fill_mask = Image.new("1", (image_width, image_height), 0)
+    outline_mask = Image.new("1", (image_width, image_height), 0)
+    fill_draw = ImageDraw.Draw(fill_mask)
+    outline_draw = ImageDraw.Draw(outline_mask)
+    bounds = (left, top, right, bottom)
+    if shape == "ellipse":
+        fill_draw.ellipse(bounds, fill=1)
+        outline_draw.ellipse(bounds, outline=1, width=stroke_width)
+    else:
+        fill_draw.rectangle(bounds, fill=1)
+        outline_draw.rectangle(bounds, outline=1, width=stroke_width)
+    outline_points = _mask_points(outline_mask)
+    fill_points = _mask_points(fill_mask) - outline_points
+    return outline_points, fill_points
+
+
+def _mask_points(mask: Image.Image) -> set[tuple[int, int]]:
+    width, height = mask.size
+    points: set[tuple[int, int]] = set()
+    pixels = mask.load()
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y]:
+                points.add((x, y))
+    return points
 
 
 def _brush_points_in_bounds(

@@ -17,7 +17,11 @@ from pixel_fix.palette.catalog import PaletteCatalogEntry, discover_palette_cata
 from pixel_fix.palette.color_modes import extract_unique_colors
 from pixel_fix.palette.edit import generate_ramp_palette_labels, merge_palette_labels
 from pixel_fix.palette.model import StructuredPalette, clone_structured_palette
-from pixel_fix.palette.quantize import generate_palette as generate_override_palette
+from pixel_fix.palette.quantize import (
+    generate_palette as generate_override_palette,
+    generate_palette_source,
+    is_structured_quantizer,
+)
 from pixel_fix.palette.sort import (
     PALETTE_SELECT_DIRECT_MODES,
     PALETTE_SELECT_HUE_MODES,
@@ -60,10 +64,13 @@ from .processing import (
     ProcessResult,
     RGBGrid,
     add_exterior_outline,
+    apply_bucket_fill,
     apply_eraser_operation,
     apply_eraser_operations,
+    apply_ellipse_operation,
     apply_pencil_operation,
     apply_pencil_operations,
+    apply_rectangle_operation,
     apply_transparency_fill,
     brush_footprint,
     display_resize_method,
@@ -136,6 +143,7 @@ RESIZE_OPTIONS = (
 QUANTIZER_OPTIONS = (
     ("Median Cut", "median-cut"),
     ("K-Means Clustering", "kmeans"),
+    ("RampForge-8", "rampforge-8"),
 )
 DITHER_OPTIONS = (
     ("None", "none"),
@@ -164,8 +172,12 @@ OUTLINE_ADAPTIVE_DARKEN_DEFAULT = 60
 CANVAS_TOOL_MODE_PALETTE_PICK = "palette-pick"
 CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK = "active-color-pick"
 CANVAS_TOOL_MODE_TRANSPARENCY_PICK = "transparency-pick"
+CANVAS_TOOL_MODE_BUCKET = "bucket"
 CANVAS_TOOL_MODE_PENCIL = "pencil"
 CANVAS_TOOL_MODE_ERASER = "eraser"
+CANVAS_TOOL_MODE_ELLIPSE = "ellipse"
+CANVAS_TOOL_MODE_RECTANGLE = "rectangle"
+EVENT_STATE_SHIFT_MASK = 0x0001
 
 
 @dataclass
@@ -239,6 +251,11 @@ class PixelFixGui:
         self._brush_stroke_last_point: tuple[int, int] | None = None
         self._brush_stroke_changed_pixels = 0
         self._brush_stroke_tool_mode: str | None = None
+        self._shape_drag_active = False
+        self._shape_preview_anchor: tuple[int, int] | None = None
+        self._shape_preview_current: tuple[int, int] | None = None
+        self._shape_preview_tool_mode: str | None = None
+        self._shape_preview_constrained = False
         self._palette_selection_indices: set[int] = set()
         self._palette_selection_anchor_index: int | None = None
         self._palette_ctrl_drag_active = False
@@ -893,22 +910,22 @@ class PixelFixGui:
             "bucket_button",
             tool_grid,
             "icon_bucket.png",
-            self._notify_bucket_unavailable,
-            "Bucket (Not Implemented)",
+            self._toggle_bucket_mode,
+            "Bucket",
         )
         circle_cell, self.circle_button = self._create_tool_button(
             "circle_button",
             tool_grid,
             "icon_circle.png",
-            lambda: self._notify_placeholder_tool("Circle"),
-            "Circle (Placeholder)",
+            self._toggle_ellipse_mode,
+            "Ellipse",
         )
         square_cell, self.square_button = self._create_tool_button(
             "square_button",
             tool_grid,
             "icon_square.png",
-            lambda: self._notify_placeholder_tool("Square"),
-            "Square (Placeholder)",
+            self._toggle_rectangle_mode,
+            "Rectangle",
         )
         add_outline_cell, self.add_outline_button = self._create_tool_button(
             "add_outline_button",
@@ -1945,6 +1962,34 @@ class PixelFixGui:
         self._schedule_state_persist()
         self._refresh_action_states()
 
+    def _set_structured_palette_preview(self, palette: StructuredPalette | None) -> None:
+        self._set_active_palette(None, "", None)
+        self.advanced_palette_preview = clone_structured_palette(palette)
+        if hasattr(self, "_menu_items") and "palette_sort" in self._menu_items:
+            self._populate_palette_sort_menu()
+
+    def _apply_structured_palette_preview(
+        self,
+        palette: StructuredPalette,
+        *,
+        message: str | None,
+        mark_stale: bool = True,
+        capture_undo: bool = False,
+    ) -> None:
+        if capture_undo:
+            self._capture_palette_undo_state()
+        else:
+            self._clear_palette_undo_state()
+            self._clear_palette_redo_state()
+        self._set_structured_palette_preview(palette)
+        if mark_stale:
+            self._mark_output_stale(message)
+        elif message:
+            self.process_status_var.set(message)
+        self._update_palette_strip()
+        self._schedule_state_persist()
+        self._refresh_action_states()
+
     def _select_builtin_palette(self, entry: PaletteCatalogEntry) -> None:
         self._clear_builtin_palette_preview()
         message = f"Selected built-in palette {entry.label} ({len(entry.colors)} colours). Click Apply Palette to use it."
@@ -2061,8 +2106,11 @@ class PixelFixGui:
             CANVAS_TOOL_MODE_PALETTE_PICK,
             CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK,
             CANVAS_TOOL_MODE_TRANSPARENCY_PICK,
+            CANVAS_TOOL_MODE_BUCKET,
             CANVAS_TOOL_MODE_PENCIL,
             CANVAS_TOOL_MODE_ERASER,
+            CANVAS_TOOL_MODE_ELLIPSE,
+            CANVAS_TOOL_MODE_RECTANGLE,
         }:
             return normalized
         return None
@@ -2079,10 +2127,12 @@ class PixelFixGui:
 
     def _set_canvas_tool_mode(self, mode: str | None) -> None:
         normalized = self._coerce_canvas_tool_mode(mode)
+        had_shape_preview = getattr(self, "_shape_drag_active", False)
         self.canvas_tool_mode = normalized
         self.palette_add_pick_mode = normalized == CANVAS_TOOL_MODE_PALETTE_PICK
         self.transparency_pick_mode = normalized == CANVAS_TOOL_MODE_TRANSPARENCY_PICK
         self._reset_brush_stroke_state()
+        self._reset_shape_preview_state()
         self._set_pick_preview(None)
         if normalized == CANVAS_TOOL_MODE_PALETTE_PICK:
             self._set_view("original")
@@ -2093,12 +2143,23 @@ class PixelFixGui:
         elif normalized == CANVAS_TOOL_MODE_TRANSPARENCY_PICK:
             self._set_view("processed")
             self.process_status_var.set("Click the processed preview to remove a connected region.")
+        elif normalized == CANVAS_TOOL_MODE_BUCKET:
+            self._set_view("processed")
+            self.process_status_var.set("Click the processed preview to fill a connected region with the primary colour.")
         elif normalized == CANVAS_TOOL_MODE_PENCIL:
             self._set_view("processed")
             self.process_status_var.set("Click and drag on the processed preview to draw with the primary colour.")
         elif normalized == CANVAS_TOOL_MODE_ERASER:
             self._set_view("processed")
             self.process_status_var.set("Click and drag on the processed preview to erase pixels to transparency.")
+        elif normalized == CANVAS_TOOL_MODE_ELLIPSE:
+            self._set_view("processed")
+            self.process_status_var.set("Click and drag on the processed preview to draw an ellipse. Hold Shift to constrain to a circle.")
+        elif normalized == CANVAS_TOOL_MODE_RECTANGLE:
+            self._set_view("processed")
+            self.process_status_var.set("Click and drag on the processed preview to draw a rectangle. Hold Shift to constrain to a square.")
+        if had_shape_preview and hasattr(self, "redraw_canvas"):
+            self.redraw_canvas()
         canvas = getattr(self, "canvas", None)
         if canvas is not None and hasattr(canvas, "configure") and not getattr(self, "dragging", False):
             canvas.configure(cursor=self._cursor_for_pointer())
@@ -2140,12 +2201,26 @@ class PixelFixGui:
         self._brush_stroke_changed_pixels = 0
         self._brush_stroke_tool_mode = None
 
+    def _reset_shape_preview_state(self) -> None:
+        self._shape_drag_active = False
+        self._shape_preview_anchor = None
+        self._shape_preview_current = None
+        self._shape_preview_tool_mode = None
+        self._shape_preview_constrained = False
+
     @staticmethod
     def _is_brush_tool_mode(mode: str | None) -> bool:
         return mode in {CANVAS_TOOL_MODE_PENCIL, CANVAS_TOOL_MODE_ERASER}
 
+    @staticmethod
+    def _is_shape_tool_mode(mode: str | None) -> bool:
+        return mode in {CANVAS_TOOL_MODE_ELLIPSE, CANVAS_TOOL_MODE_RECTANGLE}
+
     def _brush_tool_mode_active(self) -> bool:
         return self._is_brush_tool_mode(self._canvas_tool_mode_value())
+
+    def _shape_tool_mode_active(self) -> bool:
+        return self._is_shape_tool_mode(self._canvas_tool_mode_value())
 
     @staticmethod
     def _brush_tool_display_name(mode: str | None) -> str:
@@ -2153,10 +2228,53 @@ class PixelFixGui:
             return "Eraser"
         return "Pencil"
 
+    @staticmethod
+    def _shape_tool_display_name(mode: str | None, *, constrained: bool = False) -> str:
+        if mode == CANVAS_TOOL_MODE_ELLIPSE:
+            return "Circle" if constrained else "Ellipse"
+        return "Square" if constrained else "Rectangle"
+
     def _selected_palette_brush_label(self) -> int | None:
         if self._slot_is_transparent(ACTIVE_COLOR_SLOT_PRIMARY):
             return None
         return self._slot_color_label(ACTIVE_COLOR_SLOT_PRIMARY)
+
+    def _shape_fill_label(self) -> int | None:
+        if self._slot_is_transparent(ACTIVE_COLOR_SLOT_SECONDARY):
+            return None
+        return self._slot_color_label(ACTIVE_COLOR_SLOT_SECONDARY)
+
+    @staticmethod
+    def _event_has_shift(event: tk.Event | object) -> bool:
+        return bool(int(getattr(event, "state", 0) or 0) & EVENT_STATE_SHIFT_MASK)
+
+    @staticmethod
+    def _constrain_shape_endpoint(
+        anchor: tuple[int, int],
+        point: tuple[int, int],
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        anchor_x, anchor_y = anchor
+        point_x, point_y = point
+        delta_x = point_x - anchor_x
+        delta_y = point_y - anchor_y
+        sign_x = -1 if delta_x < 0 else 1
+        sign_y = -1 if delta_y < 0 else 1
+        max_x = anchor_x if sign_x < 0 else max(0, image_width - 1 - anchor_x)
+        max_y = anchor_y if sign_y < 0 else max(0, image_height - 1 - anchor_y)
+        size = min(max(abs(delta_x), abs(delta_y)), max_x, max_y)
+        return (anchor_x + (size * sign_x), anchor_y + (size * sign_y))
+
+    def _resolved_shape_preview_endpoint(self, result: ProcessResult) -> tuple[int, int] | None:
+        anchor = getattr(self, "_shape_preview_anchor", None)
+        current = getattr(self, "_shape_preview_current", None)
+        if anchor is None or current is None:
+            return None
+        if not getattr(self, "_shape_preview_constrained", False):
+            return current
+        return self._constrain_shape_endpoint(anchor, current, image_width=result.width, image_height=result.height)
 
     def _editable_palette_labels(self) -> list[int]:
         palette, _source = self._get_display_palette()
@@ -2287,6 +2405,25 @@ class PixelFixGui:
             return
         self._refresh_action_states()
 
+    def _start_bucket_mode(self) -> None:
+        if self._current_output_result() is None or self.image_state == "processing":
+            self.process_status_var.set("Create a processed image before filling.")
+            return
+        if self._selected_palette_brush_label() is None:
+            self.process_status_var.set("Set a non-transparent primary colour to fill.")
+            return
+        self._set_canvas_tool_mode(CANVAS_TOOL_MODE_BUCKET)
+        self._refresh_action_states()
+
+    def _toggle_bucket_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_BUCKET:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Bucket cancelled.")
+        else:
+            self._start_bucket_mode()
+            return
+        self._refresh_action_states()
+
     def _toggle_eraser_mode(self) -> None:
         if self._current_output_result() is None or self.image_state == "processing":
             self.process_status_var.set("Create a processed image before erasing.")
@@ -2298,11 +2435,33 @@ class PixelFixGui:
             self._set_canvas_tool_mode(CANVAS_TOOL_MODE_ERASER)
         self._refresh_action_states()
 
-    def _notify_bucket_unavailable(self) -> None:
-        self.process_status_var.set("Bucket fill is not implemented yet.")
+    def _start_shape_tool_mode(self, mode: str, *, action_name: str) -> None:
+        if self._current_output_result() is None or self.image_state == "processing":
+            self.process_status_var.set(f"Create a processed image before drawing a {action_name.lower()}.")
+            return
+        if self._selected_palette_brush_label() is None:
+            self.process_status_var.set(f"Set a non-transparent primary colour to draw a {action_name.lower()}.")
+            return
+        self._set_canvas_tool_mode(mode)
+        self._refresh_action_states()
 
-    def _notify_placeholder_tool(self, tool_name: str) -> None:
-        self.process_status_var.set(f"{tool_name} tool is not implemented yet.")
+    def _toggle_ellipse_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_ELLIPSE:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Ellipse cancelled.")
+        else:
+            self._start_shape_tool_mode(CANVAS_TOOL_MODE_ELLIPSE, action_name="Ellipse")
+            return
+        self._refresh_action_states()
+
+    def _toggle_rectangle_mode(self) -> None:
+        if self._canvas_tool_mode_value() == CANVAS_TOOL_MODE_RECTANGLE:
+            self._set_canvas_tool_mode(None)
+            self.process_status_var.set("Rectangle cancelled.")
+        else:
+            self._start_shape_tool_mode(CANVAS_TOOL_MODE_RECTANGLE, action_name="Rectangle")
+            return
+        self._refresh_action_states()
 
     def _merge_selected_palette_colors(self) -> None:
         palette = self._editable_palette_labels()
@@ -2398,10 +2557,10 @@ class PixelFixGui:
         sampled = self._sample_label_from_preview(canvas_x, canvas_y, view=pick_view)
         self._set_pick_preview(sampled)
 
-    def _preview_image_coordinates(self, canvas_x: int, canvas_y: int, *, view: str) -> tuple[int, int] | None:
+    def _preview_image_coordinates(self, canvas_x: int, canvas_y: int, *, view: str, clamp: bool = False) -> tuple[int, int] | None:
         if self._display_context is None or self._get_effective_view() != view:
             return None
-        if not self._point_is_over_image(canvas_x, canvas_y):
+        if not clamp and not self._point_is_over_image(canvas_x, canvas_y):
             return None
         width = self._display_context.sample_image.width if self._display_context.sample_image is not None else 0
         height = self._display_context.sample_image.height if self._display_context.sample_image is not None else 0
@@ -2446,6 +2605,26 @@ class PixelFixGui:
         self._refresh_output_display_images()
         self.process_status_var.set(
             f"Made {changed} pixel{'s' if changed != 1 else ''} of #{label:06X} transparent. Press Undo to restore it."
+        )
+        self.redraw_canvas()
+        self._refresh_action_states()
+        return True
+
+    def _fill_bucket_region(self, image_x: int, image_y: int) -> bool:
+        current = self._current_output_result()
+        label = self._selected_palette_brush_label()
+        if current is None or label is None:
+            return False
+        updated, changed = apply_bucket_fill(current, image_x, image_y, label)
+        if changed <= 0:
+            self.process_status_var.set("That region already uses the primary colour.")
+            return False
+        self._capture_palette_undo_state()
+        self.transparent_colors = set()
+        self._set_current_output_result(updated)
+        self._refresh_output_display_images()
+        self.process_status_var.set(
+            f"Filled {changed} pixel{'s' if changed != 1 else ''} with #{label:06X}. Press Undo to restore it."
         )
         self.redraw_canvas()
         self._refresh_action_states()
@@ -2536,6 +2715,57 @@ class PixelFixGui:
         if isinstance(changed, int) and changed > 0:
             self._brush_stroke_changed_pixels += changed
         self._brush_stroke_last_point = (image_x, image_y)
+
+    def _shape_preview_active(self) -> bool:
+        return (
+            getattr(self, "_shape_drag_active", False)
+            and getattr(self, "_shape_preview_anchor", None) is not None
+            and getattr(self, "_shape_preview_current", None) is not None
+            and self._is_shape_tool_mode(getattr(self, "_shape_preview_tool_mode", None))
+        )
+
+    def _shape_preview_operation(self) -> tuple[ProcessResult | None, int]:
+        current = self._current_output_result()
+        outline_label = self._selected_palette_brush_label()
+        if current is None or outline_label is None or not self._shape_preview_active():
+            return None, 0
+        anchor = getattr(self, "_shape_preview_anchor", None)
+        endpoint = self._resolved_shape_preview_endpoint(current)
+        if anchor is None or endpoint is None:
+            return None, 0
+        anchor_x, anchor_y = anchor
+        endpoint_x, endpoint_y = endpoint
+        fill_label = self._shape_fill_label()
+        preview_mode = getattr(self, "_shape_preview_tool_mode", None)
+        if preview_mode == CANVAS_TOOL_MODE_ELLIPSE:
+            return apply_ellipse_operation(
+                current,
+                anchor_x,
+                anchor_y,
+                endpoint_x,
+                endpoint_y,
+                outline_label,
+                fill_label=fill_label,
+                width=self._brush_width(),
+            )
+        if preview_mode == CANVAS_TOOL_MODE_RECTANGLE:
+            return apply_rectangle_operation(
+                current,
+                anchor_x,
+                anchor_y,
+                endpoint_x,
+                endpoint_y,
+                outline_label,
+                fill_label=fill_label,
+                width=self._brush_width(),
+            )
+        return None, 0
+
+    def _shape_preview_image(self) -> Image.Image | None:
+        preview_result, _changed = self._shape_preview_operation()
+        if preview_result is None:
+            return None
+        return self._build_output_display_image(preview_result, transparent_colors_override=set())
 
     def _selected_palette_outline_label(self) -> int | None:
         displayed = getattr(self, "_displayed_palette", [])
@@ -2634,8 +2864,11 @@ class PixelFixGui:
         has_output = self._current_output_result() is not None if hasattr(self, "_current_output_result") else False
         can_erase = has_output and not busy
         can_draw = can_erase and (self._selected_palette_brush_label() is not None if hasattr(self, "_selected_palette_brush_label") else False)
+        self._set_tool_button_enabled("bucket_button", can_draw)
         self._set_tool_button_enabled("pencil_button", can_draw)
         self._set_tool_button_enabled("eraser_button", can_erase)
+        self._set_tool_button_enabled("circle_button", can_draw)
+        self._set_tool_button_enabled("square_button", can_draw)
         spinbox = getattr(self, "brush_width_spinbox", None)
         if spinbox is not None and hasattr(spinbox, "configure"):
             spinbox.configure(state="normal" if can_erase else "disabled")
@@ -2876,15 +3109,42 @@ class PixelFixGui:
         if self.image_state == "processing":
             return
         source_labels = self._override_palette_source_labels()
+        method = settings.quantizer
+        label = QUANTIZER_VALUE_TO_DISPLAY.get(method, method)
+        structured_quantizer = is_structured_quantizer(method)
         if source_labels is None:
-            self.process_status_var.set("Downsample the image before generating an override palette.")
+            if structured_quantizer:
+                self.process_status_var.set(f"Downsample the image before generating a {label} palette.")
+            else:
+                self.process_status_var.set("Downsample the image before generating an override palette.")
+            return
+        if structured_quantizer:
+            try:
+                palette_source = generate_palette_source(
+                    source_labels,
+                    0,
+                    method=method,
+                    workspace=getattr(self, "workspace", None),
+                    source_label=f"Generated: {label}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror(f"Failed to generate {label}", str(exc))
+                return
+            if not isinstance(palette_source, StructuredPalette) or palette_source.palette_size() <= 0:
+                self.process_status_var.set(f"No colours were generated for the {label} palette.")
+                return
+            self._apply_structured_palette_preview(
+                palette_source,
+                message=(
+                    f"Generated a {palette_source.palette_size()}-colour {label} palette across "
+                    f"{len(palette_source.ramps)} ramps. Click Apply Palette to use it."
+                ),
+            )
             return
         palette_size = self._override_palette_target_size(source_labels, settings)
         if palette_size <= 0:
             self.process_status_var.set("No colours are available to build an override palette.")
             return
-        method = settings.quantizer
-        label = QUANTIZER_VALUE_TO_DISPLAY.get(method, method)
         try:
             palette = generate_override_palette(source_labels, palette_size, method=method)
         except Exception as exc:  # noqa: BLE001
@@ -3165,14 +3425,19 @@ class PixelFixGui:
         self._refresh_action_states()
         return True
 
-    def _build_output_display_image(self, result: ProcessResult | None) -> Image.Image | None:
+    def _build_output_display_image(
+        self,
+        result: ProcessResult | None,
+        *,
+        transparent_colors_override: set[int] | None = None,
+    ) -> Image.Image | None:
         if result is None:
             return None
         image = Image.new("RGBA", (result.width, result.height))
         if result.width <= 0 or result.height <= 0:
             return image
         alpha_mask = result.alpha_mask
-        transparent = getattr(self, "transparent_colors", set())
+        transparent = getattr(self, "transparent_colors", set()) if transparent_colors_override is None else transparent_colors_override
         data: list[tuple[int, int, int, int]] = []
         for y, row in enumerate(result.grid):
             for x, (red, green, blue) in enumerate(row):
@@ -3244,7 +3509,7 @@ class PixelFixGui:
         if applied_override_palette is not None:
             self._set_active_palette(applied_override_palette, applied_override_source or "Override", applied_override_path)
             self.advanced_palette_preview = None
-        elif result.structured_palette is not None and result.structured_palette.source_mode == "advanced":
+        elif result.structured_palette is not None and result.structured_palette.source_mode != "override":
             self.advanced_palette_preview = result.structured_palette
         self.transparent_colors = set()
         self._refresh_output_display_images()
@@ -3361,6 +3626,9 @@ class PixelFixGui:
             return None
         if self._get_effective_view() == "original":
             return self._get_comparison_original_image()
+        preview_image = self._shape_preview_image()
+        if preview_image is not None:
+            return preview_image
         return self._current_output_image()
 
     def _current_output_result(self) -> ProcessResult | None:
@@ -3435,6 +3703,12 @@ class PixelFixGui:
                 self._set_canvas_tool_mode(None)
                 self._refresh_action_states()
             return
+        if mode == CANVAS_TOOL_MODE_BUCKET:
+            coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
+            if coordinates is not None:
+                image_x, image_y = coordinates
+                self._fill_bucket_region(image_x, image_y)
+            return
         if self._is_brush_tool_mode(mode):
             coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
             if coordinates is None:
@@ -3446,6 +3720,19 @@ class PixelFixGui:
             self._brush_stroke_changed_pixels = 0
             self._capture_palette_undo_state()
             self._record_brush_stroke(image_x, image_y)
+            self.canvas.configure(cursor="crosshair")
+            return
+        if self._is_shape_tool_mode(mode):
+            coordinates = self._preview_image_coordinates(event.x, event.y, view="processed")
+            if coordinates is None:
+                return
+            self._shape_drag_active = True
+            self._shape_preview_anchor = coordinates
+            self._shape_preview_current = coordinates
+            self._shape_preview_tool_mode = mode
+            self._shape_preview_constrained = self._event_has_shift(event)
+            self._capture_palette_undo_state()
+            self.redraw_canvas()
             self.canvas.configure(cursor="crosshair")
             return
         if not self._point_is_over_image(event.x, event.y):
@@ -3463,6 +3750,14 @@ class PixelFixGui:
             image_x, image_y = coordinates
             self._record_brush_stroke(image_x, image_y)
             return
+        if getattr(self, "_shape_drag_active", False) and self._is_shape_tool_mode(getattr(self, "_shape_preview_tool_mode", None)):
+            coordinates = self._preview_image_coordinates(event.x, event.y, view="processed", clamp=True)
+            if coordinates is None:
+                return
+            self._shape_preview_current = coordinates
+            self._shape_preview_constrained = self._event_has_shift(event)
+            self.redraw_canvas()
+            return
         if not self.dragging or self._display_context is None:
             return
         canvas_width = max(1, self.canvas.winfo_width())
@@ -3473,7 +3768,7 @@ class PixelFixGui:
             self.pan_y = max(0, self.drag_pan_start[1] - (event.y - self.drag_origin[1]))
         self.redraw_canvas()
 
-    def _on_canvas_release(self, _event: tk.Event) -> None:
+    def _on_canvas_release(self, event: tk.Event) -> None:
         if getattr(self, "_brush_stroke_active", False):
             changed = int(getattr(self, "_brush_stroke_changed_pixels", 0) or 0)
             if changed > 0:
@@ -3490,18 +3785,44 @@ class PixelFixGui:
             self._reset_brush_stroke_state()
             self.canvas.configure(cursor=self._cursor_for_pointer())
             return
+        if getattr(self, "_shape_drag_active", False):
+            if hasattr(event, "x") and hasattr(event, "y"):
+                coordinates = self._preview_image_coordinates(event.x, event.y, view="processed", clamp=True)
+                if coordinates is not None:
+                    self._shape_preview_current = coordinates
+            self._shape_preview_constrained = self._event_has_shift(event)
+            updated, changed = self._shape_preview_operation()
+            if updated is not None and changed > 0:
+                mode = getattr(self, "_shape_preview_tool_mode", None)
+                constrained = bool(getattr(self, "_shape_preview_constrained", False))
+                tool_name = self._shape_tool_display_name(mode, constrained=constrained)
+                self.transparent_colors = set()
+                self._set_current_output_result(updated)
+                self._refresh_output_display_images()
+                self.process_status_var.set(
+                    f"{tool_name} changed {changed} pixel{'s' if changed != 1 else ''}. Press Undo to restore it."
+                )
+                self._refresh_action_states()
+            else:
+                clear_undo = getattr(self, "_clear_palette_undo_state", None)
+                if callable(clear_undo):
+                    clear_undo()
+            self._reset_shape_preview_state()
+            self.redraw_canvas()
+            self.canvas.configure(cursor=self._cursor_for_pointer())
+            return
         self.dragging = False
         self.canvas.configure(cursor=self._cursor_for_pointer())
 
     def _on_canvas_motion(self, event: tk.Event) -> None:
         if self.dragging:
             self.canvas.configure(cursor=CLOSED_HAND_CURSOR)
-        elif self._brush_tool_mode_active():
-            self._set_pick_preview(None)
-            self.canvas.configure(cursor="crosshair")
         elif self._active_pick_view() is not None:
             self.canvas.configure(cursor="crosshair")
             self._update_pick_preview(event.x, event.y)
+        elif self._canvas_tool_mode_value() is not None:
+            self._set_pick_preview(None)
+            self.canvas.configure(cursor="crosshair")
         else:
             self._set_pick_preview(None)
             self.canvas.configure(cursor=OPEN_HAND_CURSOR if self._point_is_over_image(event.x, event.y) else "")
@@ -3999,6 +4320,21 @@ class PixelFixGui:
             dither_mode=settings.dither_mode,
         )
 
+    def _current_quantizer_value(self) -> str:
+        quantizer_var = getattr(self, "quantizer_var", None)
+        if quantizer_var is not None:
+            try:
+                value = QUANTIZER_DISPLAY_TO_VALUE.get(quantizer_var.get(), "")
+            except Exception:
+                value = ""
+            if value:
+                return value
+        session = getattr(self, "session", None)
+        current = getattr(session, "current", None)
+        if current is not None:
+            return current.quantizer
+        return QUANTIZER_OPTIONS[0][1]
+
     @staticmethod
     def _build_prepare_cache_key(settings: PreviewSettings) -> tuple[object, ...]:
         return (
@@ -4056,7 +4392,9 @@ class PixelFixGui:
             pixel_width_spinbox.configure(state="normal" if has_image and not busy else "disabled")
         palette_reduction_spinbox = getattr(self, "palette_reduction_spinbox", None)
         if palette_reduction_spinbox is not None and hasattr(palette_reduction_spinbox, "configure"):
-            palette_reduction_spinbox.configure(state="normal" if has_image and not busy else "disabled")
+            palette_reduction_spinbox.configure(
+                state="normal" if has_image and not busy and not is_structured_quantizer(self._current_quantizer_value()) else "disabled"
+            )
         adjustment_state = tk.NORMAL if has_palette_source and not busy else tk.DISABLED
         for control in getattr(self, "palette_adjustment_controls", []):
             control.configure(state=adjustment_state)
@@ -4096,8 +4434,11 @@ class PixelFixGui:
         view_getter = getattr(view_var, "get", None)
         current_view = view_getter() if callable(view_getter) else None
         active_states = {
+            "bucket_button": tool_mode == CANVAS_TOOL_MODE_BUCKET,
             "pencil_button": tool_mode == CANVAS_TOOL_MODE_PENCIL,
             "eraser_button": tool_mode == CANVAS_TOOL_MODE_ERASER,
+            "circle_button": tool_mode == CANVAS_TOOL_MODE_ELLIPSE,
+            "square_button": tool_mode == CANVAS_TOOL_MODE_RECTANGLE,
             "palette_picker_button": tool_mode == CANVAS_TOOL_MODE_ACTIVE_COLOR_PICK,
             "view_original_button": current_view == "original",
             "view_processed_button": current_view == "processed",
